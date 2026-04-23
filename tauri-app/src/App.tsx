@@ -1,4 +1,5 @@
 import logo from "./assets/logo.png";
+import { ModelPicker } from "./components/ModelPicker";
 import { ServerControl } from "./components/ServerControl";
 import { useChromaticAberration } from "./hooks/useChromaticAberration";
 
@@ -16,6 +17,7 @@ function App() {
           Local voice inference, on your machine.
         </p>
       </main>
+      <ModelPicker />
       <ServerControl />
     </>
   );
