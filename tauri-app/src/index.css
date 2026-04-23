@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+  }
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+}
+
+.titlebar-drag {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  z-index: 50;
+  -webkit-app-region: drag;
+}
+
+.titlebar-drag * {
+  -webkit-app-region: no-drag;
+}
