@@ -1,12 +1,14 @@
 import logo from "./assets/logo.png";
 import { ServerControl } from "./components/ServerControl";
+import { useChromaticAberration } from "./hooks/useChromaticAberration";
 
 function App() {
+  const logoRef = useChromaticAberration<HTMLImageElement>();
   return (
     <>
       <div data-tauri-drag-region className="titlebar-drag" />
       <main className="flex min-h-screen flex-col items-center justify-center gap-6">
-        <img src={logo} alt="Cypress" className="h-32 w-32" />
+        <img ref={logoRef} src={logo} alt="Cypress" className="h-32 w-32 chromatic-aberration" />
         <h1 className="text-2xl font-medium tracking-tight text-foreground">
           Cypress
         </h1>

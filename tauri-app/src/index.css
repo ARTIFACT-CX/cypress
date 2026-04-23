@@ -23,3 +23,23 @@
 .titlebar-drag * {
   -webkit-app-region: no-drag;
 }
+
+/* AREA: ui · EFFECT — fake chromatic aberration via dual drop-shadow.
+   The offsets and blur are driven at runtime by useChromaticAberration,
+   which writes --ca-dx / --ca-dy / --ca-blur based on mouse position.
+   Defaults keep the effect off when the hook isn't mounted. */
+.chromatic-aberration {
+  --ca-dx: 0;
+  --ca-dy: 0;
+  --ca-blur: 0;
+  filter:
+    drop-shadow(
+      calc(var(--ca-dx) * -1px) calc(var(--ca-dy) * -1px)
+      calc(var(--ca-blur) * 1px) rgba(255, 0, 80, 0.7)
+    )
+    drop-shadow(
+      calc(var(--ca-dx) * 1px) calc(var(--ca-dy) * 1px)
+      calc(var(--ca-blur) * 1px) rgba(0, 200, 255, 0.7)
+    );
+  transition: filter 80ms linear;
+}
