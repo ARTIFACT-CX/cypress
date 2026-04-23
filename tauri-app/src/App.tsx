@@ -1,4 +1,5 @@
 import logo from "./assets/logo.png";
+import { ServerControl } from "./components/ServerControl";
 
 function App() {
   return (
@@ -13,6 +14,7 @@ function App() {
           Local voice inference, on your machine.
         </p>
       </main>
+      <ServerControl />
     </>
   );
 }

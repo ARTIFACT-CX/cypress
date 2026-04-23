@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -47,12 +48,18 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// STEP 3: run the server in a goroutine so main can listen for shutdown
-	// signals. On SIGINT/SIGTERM we drain in-flight requests and tear down the
-	// Python worker cleanly.
+	// STEP 3: bind the port first, then announce ready. Binding before
+	// logging means a bind failure (port in use, permission) is visible at
+	// the top of the log rather than buried after an optimistic "listening"
+	// line. Accept() is deferred to the goroutine below.
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		log.Fatalf("bind %s failed: %v", listenAddr, err)
+	}
+	log.Printf("cypress-server listening on %s", listenAddr)
+
 	go func() {
-		log.Printf("cypress-server listening on %s", listenAddr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server failed: %v", err)
 		}
 	}()
