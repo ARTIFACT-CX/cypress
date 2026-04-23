@@ -55,7 +55,15 @@ pub struct ServerState {
 }
 
 struct Inner {
+    // child is moved into the exit-watcher task once the server reaches
+    // Running, so stop_server can't rely on it. Everything about *killing*
+    // the server goes through pgid instead; child is here only to let us
+    // wait()/kill() during startup or after spawn failure.
     child: Option<Child>,
+    // pgid is the process group id we created via setsid at spawn time.
+    // Stays Some as long as the group is alive so stop_server and the
+    // window-close handler can signal it regardless of who owns Child.
+    pgid: Option<i32>,
     status: ServerStatus,
 }
 
@@ -64,10 +72,12 @@ impl ServerState {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 child: None,
+                pgid: None,
                 status: ServerStatus::Idle,
             })),
         }
     }
+
 }
 
 // STEP: resolve the absolute path of the Go server directory at compile time.
@@ -165,9 +175,19 @@ pub async fn start_server(app: AppHandle, state: State<'_, ServerState>) -> Resu
         });
     }
 
-    // STEP 4: stash the handle so stop_server can find it later.
+    // STEP 4: stash the handle and the process group id. We record pgid
+    // separately from `child` because the exit watcher (spawned below once
+    // startup succeeds) moves `child` out of state — without pgid being
+    // independent, stop_server would have nothing left to signal.
+    //
+    // Because we called setsid() in pre_exec, the direct child's pid is
+    // also its process group id, so `child.id()` doubles as the pgid.
     {
         let mut guard = state.inner.lock().await;
+        #[cfg(unix)]
+        {
+            guard.pgid = child.id().map(|p| p as i32);
+        }
         guard.child = Some(child);
     }
 
@@ -193,6 +213,10 @@ pub async fn start_server(app: AppHandle, state: State<'_, ServerState>) -> Resu
                 let Some(mut child) = child_opt else { return };
                 let exit = child.wait().await;
                 let mut g = inner.lock().await;
+                // The process is gone — clear pgid so neither stop_server
+                // nor the close handler try to signal a stale group id
+                // that the OS may have already recycled for someone else.
+                g.pgid = None;
                 // WHY: only emit Error if we're still in Running. If stop_server
                 // flipped us to Stopping already, the exit is expected.
                 if matches!(g.status, ServerStatus::Running) {
@@ -212,10 +236,19 @@ pub async fn start_server(app: AppHandle, state: State<'_, ServerState>) -> Resu
             Ok(())
         }
         Err(_) => {
-            // Timed out. Kill whatever we spawned.
+            // Timed out. Kill the whole process group — same reasoning as
+            // stop_server: child.kill() alone would only hit `go run`.
             let mut guard = state.inner.lock().await;
-            if let Some(mut c) = guard.child.take() {
-                let _ = c.kill().await;
+            let pgid = guard.pgid.take();
+            let child_opt = guard.child.take();
+            #[cfg(unix)]
+            if let Some(pgid) = pgid {
+                unsafe {
+                    libc::killpg(pgid, libc::SIGKILL);
+                }
+            }
+            if let Some(mut c) = child_opt {
+                let _ = c.wait().await;
             }
             guard.status = ServerStatus::Error {
                 message: "server did not become reachable before timeout".into(),
@@ -232,42 +265,58 @@ pub async fn start_server(app: AppHandle, state: State<'_, ServerState>) -> Resu
     }
 }
 
-/// Stop the Go server. Sends a termination signal and waits briefly for the
-/// process to exit cleanly; force-kills if it doesn't.
+/// Stop the Go server. Sends SIGTERM to the server's process group, waits
+/// briefly for clean exit, then SIGKILLs the group if the graceful path
+/// didn't finish in time. Always signals via pgid so we kill `go run` *and*
+/// its compiled-binary grandchild as one unit.
 #[tauri::command]
 pub async fn stop_server(app: AppHandle, state: State<'_, ServerState>) -> Result<(), String> {
-    // STEP 1: transition to Stopping and pull out the child handle.
-    let child_opt = {
+    // STEP 1: transition to Stopping and snapshot pgid + any still-owned
+    // child handle. We take pgid too so a concurrent window-close handler
+    // doesn't try to signal a group we're already reaping.
+    let (pgid, child_opt) = {
         let mut guard = state.inner.lock().await;
         if matches!(guard.status, ServerStatus::Idle) {
             return Ok(());
         }
         guard.status = ServerStatus::Stopping;
-        guard.child.take()
+        (guard.pgid.take(), guard.child.take())
     };
     let _ = app.emit(STATUS_EVENT, ServerStatus::Stopping);
 
-    // STEP 2: there may be no child if the startup watcher already reaped it.
-    // Either way, flip back to Idle.
-    if let Some(mut child) = child_opt {
-        // SAFETY: `id()` can return None if the process already exited. We
-        // only signal if we still have a pid.
-        #[cfg(unix)]
-        if let Some(pid) = child.id() {
-            // Signal the entire process group we created in start_server.
-            // Negative pid = process group on Unix.
-            // SAFETY: killpg is a direct syscall; caller just needs a valid pid.
-            unsafe {
-                libc::killpg(pid as i32, libc::SIGTERM);
-            }
+    // STEP 2: SIGTERM the whole process group. This is what actually shuts
+    // down the listening server — `child.kill()` would only hit `go run`
+    // and leave the compiled server binary running on port 7842.
+    #[cfg(unix)]
+    if let Some(pgid) = pgid {
+        // SAFETY: killpg is a direct libc syscall; pgid is the group we
+        // created via setsid at spawn time.
+        unsafe {
+            libc::killpg(pgid, libc::SIGTERM);
         }
+    }
 
-        // STEP 3: wait up to STOP_GRACE for a clean exit; otherwise force-kill.
-        match timeout(STOP_GRACE, child.wait()).await {
-            Ok(_) => {}
-            Err(_) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+    // STEP 3: wait for graceful exit. If we still own the Child handle we
+    // can await it directly; otherwise the watcher task has it and will
+    // reap on its own — we just poll the port instead.
+    let graceful = if let Some(mut child) = child_opt {
+        timeout(STOP_GRACE, child.wait()).await.is_ok()
+    } else {
+        // WHY: no Child handle means the exit watcher owns it. We can't
+        // await cross-task, so poll the port instead — once it's free the
+        // server has released its listener, which is all we actually care
+        // about for the "port in use" failure mode.
+        timeout(STOP_GRACE, wait_for_port_free()).await.is_ok()
+    };
+
+    // STEP 4: if graceful exit didn't complete, SIGKILL the whole group.
+    // Using killpg (not child.kill) ensures the compiled server binary
+    // dies even when `go run` has already reaped its child.
+    #[cfg(unix)]
+    if !graceful {
+        if let Some(pgid) = pgid {
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
             }
         }
     }
@@ -276,6 +325,32 @@ pub async fn stop_server(app: AppHandle, state: State<'_, ServerState>) -> Resul
     guard.status = ServerStatus::Idle;
     let _ = app.emit(STATUS_EVENT, ServerStatus::Idle);
     Ok(())
+}
+
+/// Best-effort synchronous shutdown used by the window-close handler. Sends
+/// SIGTERM then SIGKILL to the server's process group without awaiting —
+/// the app is exiting and we just need the port released before Go
+/// restarts. Returns Some(pgid) if a group was signalled, None otherwise.
+pub fn signal_shutdown_sync(state: &ServerState) -> Option<i32> {
+    // try_lock: if someone else has the lock we skip. The app is closing
+    // anyway; blocking here would deadlock if the holder is awaiting on
+    // something.
+    let pgid = state.inner.try_lock().ok().and_then(|mut g| {
+        let p = g.pgid.take();
+        if p.is_some() {
+            g.status = ServerStatus::Stopping;
+        }
+        p
+    })?;
+
+    #[cfg(unix)]
+    unsafe {
+        // SIGTERM first so the Go server runs its graceful shutdown (which
+        // also tells the Python worker to exit). SIGKILL follows as a
+        // backstop in case the graceful path hangs.
+        libc::killpg(pgid, libc::SIGTERM);
+    }
+    Some(pgid)
 }
 
 /// Read-only: returns the current advertised status. The UI also listens for
@@ -292,6 +367,18 @@ async fn wait_for_port() {
     // Outer loop keeps polling until the connection succeeds.
     loop {
         if TcpStream::connect((SERVER_HOST, SERVER_PORT)).await.is_ok() {
+            return;
+        }
+        sleep(STARTUP_POLL).await;
+    }
+}
+
+// Inverse of wait_for_port: returns once the port is NOT accepting
+// connections, i.e. the listener has released it. Used during stop_server
+// when we no longer own the Child handle and can't await its exit.
+async fn wait_for_port_free() {
+    loop {
+        if TcpStream::connect((SERVER_HOST, SERVER_PORT)).await.is_err() {
             return;
         }
         sleep(STARTUP_POLL).await;
