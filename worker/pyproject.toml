@@ -1,0 +1,11 @@
+# AREA: worker · CONFIG
+# Worker Python project metadata. Dependencies stay empty in the scaffold;
+# model packages (torch, moshi, etc.) get added when each model lands.
+# uv reads this file to resolve and lock dependencies into uv.lock.
+
+[project]
+name = "cypress-worker"
+version = "0.1.0"
+description = "Python inference worker for Cypress"
+requires-python = ">=3.11"
+dependencies = []
