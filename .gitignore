@@ -19,6 +19,9 @@ tauri-app/src-tauri/gen/
 *.swp
 *.swo
 
+# Claude Code per-machine settings
+.claude/settings.local.json
+
 # OS
 .DS_Store
 Thumbs.db
