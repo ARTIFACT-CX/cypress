@@ -25,6 +25,7 @@ import os
 from typing import Any, Callable, Optional
 
 from .base import Model, register
+from .moshi_stream import MoshiStream, _StreamComponents
 
 
 # SETUP: which HF repo we pull from. Defaults to the bf16 moshiko variant
@@ -97,7 +98,7 @@ class Moshi(Model):
             import torch
             from moshi.models import loaders
 
-            # WHY: belt-and-suspenders thread cap. main.py sets the env
+            # REASON: belt-and-suspenders thread cap. main.py sets the env
             # vars before torch import (which is the *primary* lever),
             # but set_num_threads catches anything that ignored them.
             # Keeping the worker on a fraction of cores leaves the OS
@@ -236,6 +237,51 @@ class Moshi(Model):
             "sample_rate": int(sample_rate),
         }
 
+    def stream(self) -> MoshiStream:
+        """Open a realtime streaming session against this loaded model.
+        Caller must `await session.start()` before feeding audio. Raises
+        if no model is loaded.
+
+        Only one active session at a time — the underlying mimi and
+        lm_gen are stateful, so a second concurrent session would
+        corrupt both. The audio pipeline enforces this at its level
+        (one connection at a time in v0.1).
+        """
+        if self._mimi is None or self._lm is None or self._checkpoint is None:
+            raise RuntimeError("model not loaded")
+
+        # STEP 1: build a fresh LMGen for this session. Reusing the
+        # upstream condition-tensor helper keeps us aligned with how
+        # different model_types (moshi, hibiki, stt) want to be primed —
+        # rebuilding here means we don't have to special-case any of
+        # them in our own code.
+        from moshi.models import LMGen
+        from moshi.run_inference import get_condition_tensors
+
+        condition_tensors = get_condition_tensors(
+            self._checkpoint.model_type, self._lm, batch_size=1, cfg_coef=1.0
+        )
+        lm_gen = LMGen(
+            self._lm,
+            cfg_coef=1.0,
+            condition_tensors=condition_tensors,
+            **self._checkpoint.lm_gen_config,
+        )
+
+        # STEP 2: bundle everything the streaming session needs into the
+        # internal components struct. Computed properties (frame_size,
+        # sample_rate) are pulled off mimi here so the session itself
+        # doesn't have to know about mimi's API.
+        components = _StreamComponents(
+            mimi=self._mimi,
+            lm_gen=lm_gen,
+            text_tokenizer=self._text_tokenizer,
+            device=self._device or "cpu",
+            frame_size=int(self._mimi.sample_rate / self._mimi.frame_rate),
+            sample_rate=int(self._mimi.sample_rate),
+        )
+        return MoshiStream(components)
+
     async def unload(self) -> None:
         # Drop references first so Python's GC can reclaim the tensors.
         self._checkpoint = None
@@ -243,7 +289,7 @@ class Moshi(Model):
         self._lm = None
         self._text_tokenizer = None
 
-        # WHY: MPS and CUDA both hold onto a caching allocator that
+        # REASON: MPS and CUDA both hold onto a caching allocator that
         # doesn't release until explicitly asked. Without these calls, a
         # model unload wouldn't actually free VRAM until the worker
         # process exits — which would make "swap to a different model"

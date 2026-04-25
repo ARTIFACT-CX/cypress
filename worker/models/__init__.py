@@ -9,7 +9,7 @@ REGISTRY.
 
 from .base import Model, REGISTRY, register
 
-# WHY: importing concrete model modules here triggers their @register
+# REASON: importing concrete model modules here triggers their @register
 # decorators so REGISTRY is fully populated by the time ipc_commands
 # looks anything up. Keep this list in sync with files in this package.
 from . import moshi  # noqa: F401

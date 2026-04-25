@@ -182,3 +182,7 @@ Prefer a sequence of small, working changes over one big sweep. Each step should
 ### Don't generate docs unprompted
 
 Don't create README, design docs, or summary markdown files unless explicitly asked. Work from conversation context.
+
+### Track progress on GitHub issues
+
+When work maps to an existing GitHub issue, post a progress comment on that issue as commits land — list the relevant commit SHAs and a short note on what's done vs still pending. Don't close the issue until it's actually finished end-to-end. Use `gh issue comment <n>` for the updates and `gh issue view <n>` first to confirm scope before commenting.

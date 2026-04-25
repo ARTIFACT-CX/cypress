@@ -84,3 +84,18 @@ def test_moshi_run_wav_rejects_when_unloaded():
     instance = moshi.Moshi(emit=lambda _msg: None)
     with pytest.raises(RuntimeError, match="not loaded"):
         instance.run_wav("in.wav", "out.wav")
+
+
+def test_moshi_exposes_stream():
+    # IPC handler will gate streaming requests on hasattr(instance,
+    # "stream"); pin the public name so a rename doesn't silently break
+    # the audio pipeline's session setup.
+    assert callable(getattr(moshi.Moshi, "stream", None))
+
+
+def test_moshi_stream_rejects_when_unloaded():
+    # Same defensive shape as run_wav: a half-loaded instance must raise
+    # clearly rather than crashing inside LMGen construction.
+    instance = moshi.Moshi(emit=lambda _msg: None)
+    with pytest.raises(RuntimeError, match="not loaded"):
+        instance.stream()
