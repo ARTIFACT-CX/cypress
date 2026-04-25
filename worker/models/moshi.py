@@ -61,8 +61,12 @@ EmitFn = Callable[[dict], None]
 
 @register
 class Moshi(Model):
-    # Must match the `name` string the UI sends in load_model commands.
-    name = "moshi"
+    # `moshi-torch` is the explicit selector for the PyTorch backend. On
+    # platforms where torch is the autoselect default (anything but
+    # Apple Silicon today), __init__.py also aliases `"moshi"` to this
+    # class. Keeping the explicit name lets users force-select the torch
+    # path even on Apple Silicon, which is useful for A/B comparison.
+    name = "moshi-torch"
 
     def __init__(self, emit: EmitFn):
         # emit is a worker→host one-way channel (no reply expected). Used

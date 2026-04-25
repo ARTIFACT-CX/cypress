@@ -14,6 +14,7 @@ dependencies = [
     "moshi>=0.2.0",
     # hf_hub_download is used directly for weight resolution / cache dirs.
     "huggingface_hub>=0.24",
+    "moshi-mlx>=0.2.0",
 ]
 
 # REASON: dev-only deps (test runner, async test helper) live in a uv

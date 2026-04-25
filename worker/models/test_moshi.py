@@ -52,13 +52,24 @@ def test_detect_device_falls_back_to_cpu(monkeypatch):
     assert moshi._detect_device() == "cpu"
 
 
-def test_moshi_registered_under_correct_name():
+def test_moshi_torch_registered_under_explicit_name():
     # Loose smoke check that the @register decorator wired the class in
-    # under the same name the UI sends in load_model commands.
+    # under the explicit backend name. The autoselect alias `"moshi"` is
+    # platform-dependent and tested separately.
+    from . import REGISTRY
+
+    assert "moshi-torch" in REGISTRY
+    assert REGISTRY["moshi-torch"] is moshi.Moshi
+
+
+def test_moshi_alias_resolves_to_one_of_the_backends():
+    # `"moshi"` is an alias chosen at import time by __init__.py based on
+    # platform / env override. Either backend is a valid resolution — we
+    # just want to confirm the alias exists and points at a real class.
     from . import REGISTRY
 
     assert "moshi" in REGISTRY
-    assert REGISTRY["moshi"].name == "moshi"
+    assert REGISTRY["moshi"] in (REGISTRY["moshi-torch"], REGISTRY["moshi-mlx"])
 
 
 def test_moshi_initial_state_is_unloaded():
