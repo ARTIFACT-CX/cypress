@@ -5,8 +5,9 @@
 // loading weights, load error) is surfaced here so the user sees one
 // clear status instead of having to watch a console.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { useToast } from "./Toast";
 
 // SWAP: model catalog. Extend this list (Kokoro, Orpheus, PersonaPlex
 // variants, etc.) as loaders are implemented worker-side. The `name`
@@ -63,6 +64,17 @@ export function ModelPicker() {
   const [status, setStatus] = useState<Status>(EMPTY_STATUS);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // SAFETY: ref mirrors `pending` for the click handler. setState is async,
+  // so a quick burst of clicks all see the stale `pending === null` and
+  // each fire a /model/load. The ref updates synchronously and lets the
+  // first click win.
+  const pendingRef = useRef<string | null>(null);
+  const toast = useToast();
+  // Keep the ref in lock-step with state so terminal transitions (success,
+  // error, server stop) clear it without each branch having to remember.
+  useEffect(() => {
+    pendingRef.current = pending;
+  }, [pending]);
 
   // STEP 3: subscribe to the Rust-emitted server-status events so we know
   // when to start polling /status. No point fetching while the server is
@@ -143,8 +155,24 @@ export function ModelPicker() {
   }, [pending]);
 
   const loadModel = useCallback(async (name: string) => {
+    // STEP 1: short-circuit if a load is already in flight (see pendingRef
+    // above). Without this, rapid double-clicks each kick off a POST
+    // before React commits the disabled state.
+    if (pendingRef.current !== null) return;
+    // STEP 2: refuse if the server isn't up yet. We surface this as a
+    // toast rather than silently no-op'ing so the user knows *why*
+    // nothing happened. The button is intentionally not `disabled` in
+    // this case — a click should still get feedback.
+    if (serverState !== "running") {
+      toast.show("Start the server first to load a model.", {
+        variant: "warn",
+      });
+      return;
+    }
+    pendingRef.current = name;
     setPending(name);
     setError(null);
+    console.log(`[model] click → loading "${name}"`);
     try {
       // WHY: /model/load is fire-and-forget. The server returns 202 as
       // soon as the load goroutine is kicked off; completion (success
@@ -160,25 +188,70 @@ export function ModelPicker() {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || `HTTP ${res.status}`);
       }
+      console.log(`[model] server accepted load (${res.status})`);
     } catch (e) {
+      console.error(`[model] load request failed:`, e);
       setError(e instanceof Error ? e.message : String(e));
       setPending(null);
     }
-  }, []);
+  }, [serverState, toast]);
+
+  // DEV: log lifecycle transitions so we can trace click → download →
+  // loaded in the browser console without needing the server logs side-
+  // by-side. Watches state and phase; both are debounced by React's
+  // dedupe so we only log on real changes.
+  const prevPhase = useRef<string>("");
+  const prevState = useRef<InferenceState>("idle");
+  useEffect(() => {
+    if (status.phase && status.phase !== prevPhase.current) {
+      console.log(`[model] phase: ${status.phase}`);
+      prevPhase.current = status.phase;
+    }
+    if (status.state !== prevState.current) {
+      if (status.state === "serving") {
+        console.log(
+          `[model] loaded "${status.model}" on ${status.device || "?"}`,
+        );
+      } else if (status.state === "loading") {
+        console.log(`[model] downloading/loading "${status.model}"…`);
+      }
+      prevState.current = status.state;
+    }
+    if (status.error) {
+      console.error(`[model] error: ${status.error}`);
+    }
+  }, [status]);
 
   const serverUp = serverState === "running";
   const busy =
     pending !== null ||
     status.state === "loading" ||
     status.state === "starting";
+  // WHY: there's a small window between clicking a model and the worker
+  // emitting its first phase event where status.phase is empty. Without a
+  // fallback the section would look frozen — show a generic "Preparing…"
+  // until the real phase string arrives.
   const phaseLabel = status.phase
     ? PHASE_LABELS[status.phase] ?? status.phase
-    : null;
+    : busy
+      ? "Preparing…"
+      : null;
 
   return (
     <div className="fixed bottom-4 left-4 flex max-w-xs flex-col gap-2 rounded-md border bg-card/80 p-3 text-xs backdrop-blur">
       <div className="font-medium text-foreground">Model</div>
-      <div className="flex flex-col gap-1.5">
+      {/* WHY: while a load is in flight the whole section is locked —
+          aria-busy + pointer-events-none on the inner list keeps clicks
+          from queueing on top of an in-flight request, which previously
+          caused noticeable lag from piled-up POSTs. The pending button
+          stays at full opacity so the user can see *which* model is
+          loading at a glance. */}
+      <div
+        aria-busy={busy}
+        className={`flex flex-col gap-1.5 ${
+          busy ? "pointer-events-none" : ""
+        }`}
+      >
         {MODELS.map((m) => {
           const isActive =
             status.model === m.name && status.state === "serving";
@@ -188,11 +261,26 @@ export function ModelPicker() {
               key={m.name}
               type="button"
               onClick={() => loadModel(m.name)}
-              disabled={!serverUp || busy}
-              className={`flex flex-col items-start rounded border px-2 py-1.5 text-left transition-colors disabled:opacity-50 ${
+              // WHY: only `busy` truly disables the button. When the server
+              // isn't up we want the click to still fire so loadModel can
+              // surface a toast ("Start the server first") — silently
+              // disabling leaves the user wondering why nothing happens.
+              disabled={busy}
+              className={`group/model flex flex-col items-start rounded border px-2 py-1.5 text-left transition-all ${
                 isActive
                   ? "border-primary bg-primary/10 text-foreground"
-                  : "border-border bg-secondary text-secondary-foreground hover:bg-accent"
+                  : // WHY: hover lifts the border to primary + nudges the row
+                    // right one pixel and adds a soft ring so the user gets a
+                    // clear "this is clickable" cue. Cursor-pointer is
+                    // explicit because Tauri/macOS won't add it on buttons by
+                    // default in some webview versions.
+                    "cursor-pointer border-border bg-secondary text-secondary-foreground hover:translate-x-0.5 hover:border-primary/60 hover:bg-accent hover:shadow-sm"
+              } ${
+                busy && !isPending
+                  ? "opacity-40"
+                  : !serverUp
+                    ? "opacity-50"
+                    : ""
               }`}
             >
               <span className="flex items-center gap-1.5 font-medium">
