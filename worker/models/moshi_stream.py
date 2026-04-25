@@ -210,39 +210,47 @@ class MoshiStream:
         import numpy as np
         import torch
 
-        # int16 LE bytes → float32 in [-1, 1], shape (frame_size,)
-        samples = np.frombuffer(frame_pcm, dtype=np.int16).astype(np.float32)
-        samples /= 32768.0
-        chunk_t = torch.from_numpy(samples).to(self._c.device)[None, None]
+        # SAFETY: inference_mode disables autograd graph construction *and*
+        # version-counter tracking. Without it, every lm_gen.step() retains
+        # the full forward graph; over hundreds of streamed frames that's
+        # GBs of dangling tensors, and on Mac unified memory the OS swaps
+        # itself to death (this crashed a machine before the wrapper went
+        # in). run_wav has the equivalent torch.no_grad() — keep both paths
+        # gradient-free.
+        with torch.inference_mode():
+            # int16 LE bytes → float32 in [-1, 1], shape (frame_size,)
+            samples = np.frombuffer(frame_pcm, dtype=np.int16).astype(np.float32)
+            samples /= 32768.0
+            chunk_t = torch.from_numpy(samples).to(self._c.device)[None, None]
 
-        codes = self._c.mimi.encode(chunk_t)
+            codes = self._c.mimi.encode(chunk_t)
 
-        out: "list[StreamChunk]" = []
-        # codes.shape[-1] is the number of code positions per audio frame —
-        # typically 1, but the loop generalizes for safety.
-        for c in range(codes.shape[-1]):
-            tokens = self._c.lm_gen.step(codes[:, :, c : c + 1])
-            if tokens is None:
-                continue
-            # tokens shape: (batch=1, dep_q+1, 1). Channel 0 = text token;
-            # channels 1.. = codec tokens that decode into PCM.
-            text_id = int(tokens[0, 0, 0].item())
-            text: Optional[str] = None
-            # Token ids 0 (pad) and 3 (other special) are filler — not
-            # part of the spoken inner monologue, so we drop them. This
-            # matches upstream's filtering in moshi.server.
-            if text_id not in (0, 3):
-                piece = self._c.text_tokenizer.id_to_piece(text_id)
-                # SentencePiece prefixes word starts with U+2581 (▁); turn
-                # back into a regular leading space so consumers can just
-                # concatenate pieces into a readable string.
-                text = piece.replace("▁", " ")
+            out: "list[StreamChunk]" = []
+            # codes.shape[-1] is the number of code positions per audio frame —
+            # typically 1, but the loop generalizes for safety.
+            for c in range(codes.shape[-1]):
+                tokens = self._c.lm_gen.step(codes[:, :, c : c + 1])
+                if tokens is None:
+                    continue
+                # tokens shape: (batch=1, dep_q+1, 1). Channel 0 = text token;
+                # channels 1.. = codec tokens that decode into PCM.
+                text_id = int(tokens[0, 0, 0].item())
+                text: Optional[str] = None
+                # Token ids 0 (pad) and 3 (other special) are filler — not
+                # part of the spoken inner monologue, so we drop them. This
+                # matches upstream's filtering in moshi.server.
+                if text_id not in (0, 3):
+                    piece = self._c.text_tokenizer.id_to_piece(text_id)
+                    # SentencePiece prefixes word starts with U+2581 (▁); turn
+                    # back into a regular leading space so consumers can just
+                    # concatenate pieces into a readable string.
+                    text = piece.replace("▁", " ")
 
-            audio_t = self._c.mimi.decode(tokens[:, 1:]).cpu()  # (1, 1, N)
-            audio_np = audio_t[0, 0].numpy()
-            # float [-1, 1] → int16 LE bytes for the wire. Clip first so a
-            # mildly out-of-range sample doesn't wrap around to a loud pop.
-            audio_int16 = (np.clip(audio_np, -1.0, 1.0) * 32767.0).astype(np.int16)
-            out.append(StreamChunk(audio_pcm=audio_int16.tobytes(), text=text))
+                audio_t = self._c.mimi.decode(tokens[:, 1:]).cpu()  # (1, 1, N)
+                audio_np = audio_t[0, 0].numpy()
+                # float [-1, 1] → int16 LE bytes for the wire. Clip first so a
+                # mildly out-of-range sample doesn't wrap around to a loud pop.
+                audio_int16 = (np.clip(audio_np, -1.0, 1.0) * 32767.0).astype(np.int16)
+                out.append(StreamChunk(audio_pcm=audio_int16.tobytes(), text=text))
 
-        return out
+            return out

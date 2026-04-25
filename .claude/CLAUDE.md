@@ -110,6 +110,16 @@ Format: `AREA: <domain> · <subsystem> [· <sub-subsystem>]`. Categories we'll u
 
 When a comment would be longer than the code, the code should probably be simpler.
 
+### Memory discipline (ML hot paths)
+
+Inference code runs on devices where leaks turn into crashes, not warnings. On Mac unified memory in particular, an unbounded tensor allocation will swap the OS itself to death and take the whole machine with it.
+
+- **Always wrap inference in `torch.inference_mode()`** (or at minimum `torch.no_grad()`) — anywhere a model's forward pass runs outside training. Without it, every step retains its autograd graph; over a streaming session that's GBs of dangling tensors.
+- This applies to streaming paths and one-shot calls alike. If a function calls into a `torch.nn.Module` and isn't training, it needs the wrapper.
+- When swapping models, drop references *and* call the device's allocator-release hook (`torch.mps.empty_cache()` / `torch.cuda.empty_cache()`). The caching allocator doesn't free until asked.
+- Tensors leaving the hot loop go through `.cpu()` (or `.numpy()`) before the loop body ends — don't accumulate device tensors in Python lists.
+- Bounded queues only on streaming paths. Unbounded `asyncio.Queue` / Go channel between a fast producer and a slow consumer is a slow-motion crash.
+
 ## Testing
 
 **Scope:** applies to **`server/` (Go) and `worker/` (Python)**. The React app (`app/`) is exempt for now.
