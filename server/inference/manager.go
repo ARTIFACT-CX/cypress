@@ -14,10 +14,18 @@ package inference
 import (
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
+
+// loadTimeout caps how long a single model load can run. First-run HF
+// downloads of the LM weights are several GB on a residential link, so
+// budget generously — but bound it so a wedged loader can't pin the
+// worker forever and silently swallow further requests.
+const loadTimeout = 15 * time.Minute
 
 // State is the public lifecycle of the inference subsystem. The UI polls
 // this to render "loading…", enable/disable buttons, etc.
@@ -69,15 +77,23 @@ func NewManager() *Manager {
 	return &Manager{state: StateIdle}
 }
 
-// LoadModel lazily boots the worker (if idle), then asks it to load `name`.
-// Errors from spawn, handshake, and the worker-side loader all bubble up
-// verbatim so the UI can display a meaningful message instead of a generic
-// "something went wrong".
-func (m *Manager) LoadModel(ctx context.Context, name string) error {
-	// STEP 1: take the lock, check we're in a state that accepts a new
-	// load, and optimistically advance. Releasing before the slow spawn
-	// means a second LoadModel arriving during boot gets a clean "busy"
-	// rather than silently queuing.
+// LoadModel kicks off a model load. Returns synchronously as soon as the
+// manager has advanced to a non-idle state — the long-running work (uv
+// cold start, HF download, weight transfer) runs on a background
+// goroutine and posts results back via state mutations. This matters for
+// the UI: by the time our HTTP handler returns 202, /status will already
+// report state=starting/loading instead of the stale previous state. If
+// the flip were inside the goroutine, the UI's first poll could race in
+// before the goroutine ran and see the *previous* state, prematurely
+// concluding the load was done.
+//
+// Errors returned here are pre-flight only (busy). Errors from spawn,
+// handshake, or the worker-side loader land in m.lastError and surface
+// via /status.
+func (m *Manager) LoadModel(name string) error {
+	// STEP 1: synchronously advance state under the lock so a /status
+	// call observed any time after this returns sees "starting" or
+	// "loading", never a stale "idle"/"serving".
 	m.mu.Lock()
 	if m.state == StateStarting || m.state == StateLoading {
 		m.mu.Unlock()
@@ -86,57 +102,80 @@ func (m *Manager) LoadModel(ctx context.Context, name string) error {
 	// Clear any stale error from a previous failed attempt so the UI
 	// doesn't continue to show it once the user retries.
 	m.lastError = ""
-
 	if m.worker == nil {
 		m.state = StateStarting
-		m.mu.Unlock()
+	} else {
+		m.state = StateLoading
+	}
+	m.mu.Unlock()
 
-		// STEP 2: spawn outside the lock. This can take several seconds
-		// on first uv run (resolving + installing deps into the venv).
+	// STEP 2: hand off the slow work with our own internal context. We
+	// don't reuse the HTTP request's context because the request returns
+	// in milliseconds; doLoad needs to outlive it for the full download.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), loadTimeout)
+		defer cancel()
+		m.doLoad(ctx, name)
+	}()
+	return nil
+}
+
+// doLoad is the actually-blocking half of LoadModel. Runs on a goroutine
+// owned by the manager; never call directly. All exit paths must leave
+// the manager in a sensible terminal state (Idle / Ready / Serving) so
+// the UI's /status poll converges.
+func (m *Manager) doLoad(ctx context.Context, name string) {
+	// STEP A: spawn the worker if we don't have one. uv cold start can
+	// take several seconds on first run; we hold no lock during it so
+	// /status keeps responding.
+	m.mu.Lock()
+	needSpawn := m.worker == nil
+	m.mu.Unlock()
+
+	if needSpawn {
 		w, err := spawnWorker(ctx, workerDir())
-
 		m.mu.Lock()
 		if err != nil {
 			m.state = StateIdle
+			m.lastError = err.Error()
 			m.mu.Unlock()
-			return err
+			log.Printf("worker spawn failed: %v", err)
+			return
 		}
-		// STEP 2a: wire the event handler. The worker emits phase
-		// updates during load (downloading_mimi, loading_tokenizer,
-		// etc.); we stash the latest one so the /status endpoint can
-		// return it for the UI to display.
 		w.onEvent = m.handleEvent
 		m.worker = w
+		m.state = StateLoading
+		m.mu.Unlock()
 	}
 
-	m.state = StateLoading
+	// STEP B: ask the worker to load the model. The "name" field matches
+	// the worker's ipc_commands.load_model handler.
+	m.mu.Lock()
 	w := m.worker
 	m.mu.Unlock()
 
-	// STEP 3: ask the worker to load the model. The "name" field matches
-	// the worker's ipc_commands.load_model handler.
 	reply, err := w.send(ctx, "load_model", map[string]any{"name": name})
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// Always clear phase once load_model returns — the transitional
-	// "downloading_*" strings are meaningful only during the blocking call.
+	// Phase is only meaningful while load_model is in flight; clear it
+	// regardless of outcome so the UI doesn't show "downloading…" forever.
 	m.phase = ""
 
 	if err != nil {
-		// WHY: on loader failure we stay in Ready, not Idle — the worker
-		// is still up and happy to try a different model. Killing it on
+		// WHY: on loader failure stay in Ready, not Idle — the worker is
+		// still up and willing to try a different model. Killing it on
 		// every failed load would make recovery needlessly expensive.
 		m.state = StateReady
 		m.lastError = err.Error()
-		return err
+		log.Printf("load_model %q failed: %v", name, err)
+		return
 	}
 	m.model = name
 	if dev, ok := reply["device"].(string); ok {
 		m.device = dev
 	}
 	m.state = StateServing
-	return nil
 }
 
 // handleEvent is the worker.onEvent callback. Fires for every unsolicited

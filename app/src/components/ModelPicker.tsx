@@ -62,19 +62,25 @@ export function ModelPicker() {
   // STEP 2: track the inference subsystem's own state. Populated by polling
   // /status while a load is in flight, and once on server-ready.
   const [status, setStatus] = useState<Status>(EMPTY_STATUS);
+  // submitting is set the moment the user clicks, while the POST is in
+  // flight. Once the server returns 202 we move the value to `pending`,
+  // which gates the /status polling. Splitting these two prevents a
+  // race: if we drove polling off `pending` from the click moment, the
+  // first /status request could land in parallel with /model/load and
+  // return the previous "serving" snapshot before LoadModel had a chance
+  // to flip state — the UI would then immediately clear pending and
+  // appear unchanged.
+  const [submitting, setSubmitting] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // SAFETY: ref mirrors `pending` for the click handler. setState is async,
-  // so a quick burst of clicks all see the stale `pending === null` and
-  // each fire a /model/load. The ref updates synchronously and lets the
-  // first click win.
+  // SAFETY: ref tracks "any load in flight" (submitting or pending) so a
+  // burst of rapid clicks before React commits any state still sees
+  // there's a load in flight. setState is async; this ref isn't.
   const pendingRef = useRef<string | null>(null);
   const toast = useToast();
-  // Keep the ref in lock-step with state so terminal transitions (success,
-  // error, server stop) clear it without each branch having to remember.
   useEffect(() => {
-    pendingRef.current = pending;
-  }, [pending]);
+    pendingRef.current = pending ?? submitting;
+  }, [pending, submitting]);
 
   // STEP 3: subscribe to the Rust-emitted server-status events so we know
   // when to start polling /status. No point fetching while the server is
@@ -98,6 +104,7 @@ export function ModelPicker() {
   useEffect(() => {
     if (serverState !== "running") {
       setStatus(EMPTY_STATUS);
+      setSubmitting(null);
       setPending(null);
       setError(null);
       return;
@@ -129,14 +136,17 @@ export function ModelPicker() {
         .then((s: Status) => {
           if (cancelled) return;
           setStatus(s);
-          // Terminal states: stop tracking pending. Serving means load
-          // completed; ready-with-error means the worker rejected it.
-          // Idle shouldn't happen mid-load but treat it as terminal too
-          // in case the worker crashed out from under us.
-          if (s.state === "serving" || s.state === "idle") {
-            setPending(null);
-          } else if (s.state === "ready" && s.error) {
+          // Terminal-state detection: an error from any state is final
+          // (worker rejected the load, or the worker crashed). Otherwise
+          // we only consider the load complete when the *expected* model
+          // is actually serving — comparing s.model to pending guards
+          // against a transient "serving" snapshot for a previous model
+          // that the polling effect might catch before the worker has
+          // unloaded it.
+          if (s.error) {
             setError(s.error);
+            setPending(null);
+          } else if (s.state === "serving" && s.model === pending) {
             setPending(null);
           }
         })
@@ -152,12 +162,14 @@ export function ModelPicker() {
       cancelled = true;
       clearInterval(handle);
     };
+    // pending is the trigger; including it here means a successful load
+    // (which clears pending) tears the interval down on the next render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pending]);
 
   const loadModel = useCallback(async (name: string) => {
-    // STEP 1: short-circuit if a load is already in flight (see pendingRef
-    // above). Without this, rapid double-clicks each kick off a POST
-    // before React commits the disabled state.
+    // STEP 1: short-circuit if a load is already in flight (covers both
+    // the in-flight POST and an active polling cycle).
     if (pendingRef.current !== null) return;
     // STEP 2: refuse if the server isn't up yet. We surface this as a
     // toast rather than silently no-op'ing so the user knows *why*
@@ -170,15 +182,15 @@ export function ModelPicker() {
       return;
     }
     pendingRef.current = name;
-    setPending(name);
+    // submitting drives the *visual* "loading…" state immediately so the
+    // user sees feedback while the POST is in flight. We deliberately
+    // don't set `pending` yet — `pending` gates the /status polling and
+    // we need that to start *after* the server has acknowledged the
+    // load (see the race comment near useState above).
+    setSubmitting(name);
     setError(null);
     console.log(`[model] click → loading "${name}"`);
     try {
-      // WHY: /model/load is fire-and-forget. The server returns 202 as
-      // soon as the load goroutine is kicked off; completion (success
-      // or failure) is observed via the /status poll above. This lets
-      // multi-minute first-run downloads work reliably without being
-      // bounded by the browser's fetch timeout.
       const res = await fetch(`${SERVER_URL}/model/load`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -189,10 +201,16 @@ export function ModelPicker() {
         throw new Error(body.error || `HTTP ${res.status}`);
       }
       console.log(`[model] server accepted load (${res.status})`);
+      // STEP 3: server has synchronously flipped state to starting/
+      // loading. Now it's safe to start the /status poll — the next
+      // tick is guaranteed to read the new state.
+      setSubmitting(null);
+      setPending(name);
     } catch (e) {
       console.error(`[model] load request failed:`, e);
       setError(e instanceof Error ? e.message : String(e));
-      setPending(null);
+      setSubmitting(null);
+      pendingRef.current = null;
     }
   }, [serverState, toast]);
 
@@ -224,6 +242,7 @@ export function ModelPicker() {
 
   const serverUp = serverState === "running";
   const busy =
+    submitting !== null ||
     pending !== null ||
     status.state === "loading" ||
     status.state === "starting";
@@ -255,7 +274,7 @@ export function ModelPicker() {
         {MODELS.map((m) => {
           const isActive =
             status.model === m.name && status.state === "serving";
-          const isPending = pending === m.name;
+          const isPending = pending === m.name || submitting === m.name;
           return (
             <button
               key={m.name}

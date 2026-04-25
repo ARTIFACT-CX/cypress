@@ -24,8 +24,45 @@ import os
 import sys
 import traceback
 
+# WHY: drop scheduling priority before any heavy work so the loader and
+# (later) the streaming generation don't starve the rest of the system.
+# Loading a 7B model into MPS saturates memory bandwidth and CPU cores
+# enough to make the whole desktop feel laggy at default priority. nice
+# +10 leaves us well below interactive apps in the macOS / Linux
+# scheduler. Wrapped in try/except because os.nice is a noop on Windows
+# and we don't want startup to hard-fail there.
+try:
+    os.nice(10)
+except (OSError, AttributeError):
+    pass
+
+# WHY: cap thread pools that PyTorch / OpenMP read at import time. Apple
+# Silicon ships 8–10 cores; letting torch claim all of them during a
+# load is what causes other apps to stutter. Set before any torch
+# import — these env vars are read once at OMP/MKL init and ignored
+# afterward. set_num_threads inside Python is a runtime escape hatch.
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "4")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "4")
+
+# WHY: optional GPU allocator cap. PyTorch's defaults overcommit
+# unified memory enough to push the desktop into swap during a load,
+# but capping low enough to keep the system fully responsive doesn't
+# leave room for the 7B model on smaller machines. Whether the
+# trade-off is worth it depends on the machine + model, so this is
+# opt-in rather than a default. Set CYPRESS_MPS_HIGH_RATIO to enable
+# (e.g. 1.0 for "no overcommit", lower for stricter caps). PyTorch
+# enforces LOW <= HIGH and its default LOW is 1.4, so we pin LOW
+# alongside HIGH whenever the user opts in.
+_mps_high = os.environ.get("CYPRESS_MPS_HIGH_RATIO")
+if _mps_high:
+    os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.0")
+    os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", _mps_high)
+
 import audio
 import ipc
+
 # WHY: importing `models` triggers each concrete model's @register
 # decorator and populates models.REGISTRY. We do that here, in the
 # composition root, then hand the populated registry to ipc — keeping

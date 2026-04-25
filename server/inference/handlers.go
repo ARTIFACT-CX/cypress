@@ -10,11 +10,9 @@
 package inference
 
 import (
-	"context"
 	"encoding/json"
 	"log"
 	"net/http"
-	"time"
 )
 
 // RegisterRoutes attaches the inference HTTP routes onto the given mux.
@@ -43,22 +41,17 @@ func RegisterRoutes(mux *http.ServeMux, mgr *Manager) {
 			http.Error(w, "missing 'name'", http.StatusBadRequest)
 			return
 		}
-		// WHY: fire-and-forget. First-run model downloads can take many
-		// minutes, and the browser's fetch would time out long before the
-		// download finishes — leaving the UI thinking the load failed
-		// while the worker is still happily pulling weights. Instead we
-		// kick the load off in a background goroutine (with a generous
-		// upper bound so a wedged loader can't pin the worker forever)
-		// and let the UI drive completion from /status polling. The
-		// Snapshot carries state + phase + error, which is everything
-		// the UI needs to render the outcome.
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-			defer cancel()
-			if err := mgr.LoadModel(ctx, body.Name); err != nil {
-				log.Printf("load_model %q failed: %v", body.Name, err)
-			}
-		}()
+		// WHY: LoadModel returns as soon as the manager has flipped to
+		// starting/loading; the actual blocking work (HF download, weight
+		// transfer) runs on a goroutine the manager owns. The UI drives
+		// completion via /status polling. Errors here are pre-flight only
+		// (e.g. another load already in progress); loader failures
+		// surface through Snapshot.Error.
+		if err := mgr.LoadModel(body.Name); err != nil {
+			log.Printf("load_model %q rejected: %v", body.Name, err)
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"ok":    true,
 			"model": body.Name,
