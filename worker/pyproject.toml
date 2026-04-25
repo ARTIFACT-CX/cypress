@@ -15,3 +15,26 @@ dependencies = [
     # hf_hub_download is used directly for weight resolution / cache dirs.
     "huggingface_hub>=0.24",
 ]
+
+# REASON: dev-only deps (test runner, async test helper) live in a uv
+# dependency group so packaged builds don't ship pytest. Activate locally
+# with `uv sync --group dev`; CI runs `uv run --group dev pytest`.
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+# REASON: keeping integration tests gated behind a marker means a default
+# `pytest` run stays fast and dependency-light (no real model loads, no
+# real subprocesses). Run integration explicitly with `pytest -m integration`.
+markers = [
+    "integration: end-to-end tests that exercise real subprocesses, sockets, or model loaders",
+]
+# Default invocation deselects integration; override with `-m integration`
+# (the explicit -m on the cmdline replaces this addopts value, so the
+# integration suite still runs when asked for).
+addopts = "-m 'not integration'"
+# pytest-asyncio: allow `async def test_...` without a per-test decorator.
+asyncio_mode = "auto"

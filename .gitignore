@@ -42,11 +42,12 @@ venv/
 # uv keeps its lockfile in the repo, but ignore the cache
 .uv-cache/
 
-# Models / large files
+# Models / large files. Extension-based rules cover weight files wherever
+# they land; we don't blanket-ignore `models/` because that's also the name
+# of our worker/models source feature.
 *.gguf
 *.safetensors
 *.bin
 *.pt
 *.pth
 *.onnx
-models/
