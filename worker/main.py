@@ -24,7 +24,7 @@ import os
 import sys
 import traceback
 
-# WHY: drop scheduling priority before any heavy work so the loader and
+# REASON: drop scheduling priority before any heavy work so the loader and
 # (later) the streaming generation don't starve the rest of the system.
 # Loading a 7B model into MPS saturates memory bandwidth and CPU cores
 # enough to make the whole desktop feel laggy at default priority. nice
@@ -36,7 +36,7 @@ try:
 except (OSError, AttributeError):
     pass
 
-# WHY: cap thread pools that PyTorch / OpenMP read at import time. Apple
+# REASON: cap thread pools that PyTorch / OpenMP read at import time. Apple
 # Silicon ships 8–10 cores; letting torch claim all of them during a
 # load is what causes other apps to stutter. Set before any torch
 # import — these env vars are read once at OMP/MKL init and ignored
@@ -46,7 +46,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "4")
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "4")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "4")
 
-# WHY: optional GPU allocator cap. PyTorch's defaults overcommit
+# REASON: optional GPU allocator cap. PyTorch's defaults overcommit
 # unified memory enough to push the desktop into swap during a load,
 # but capping low enough to keep the system fully responsive doesn't
 # leave room for the 7B model on smaller machines. Whether the
@@ -63,7 +63,7 @@ if _mps_high:
 import audio
 import ipc
 
-# WHY: importing `models` triggers each concrete model's @register
+# REASON: importing `models` triggers each concrete model's @register
 # decorator and populates models.REGISTRY. We do that here, in the
 # composition root, then hand the populated registry to ipc — keeping
 # ipc unaware of the models feature.
@@ -81,7 +81,7 @@ def _socket_path() -> str:
 
 
 def _write(msg: dict) -> None:
-    # WHY: stdout is line-buffered by default when attached to a pipe in
+    # REASON: stdout is line-buffered by default when attached to a pipe in
     # Python 3.11+, but flush explicitly so the host sees each reply
     # immediately. Any delay here shows up as apparent hangs on the Go side.
     sys.stdout.write(json.dumps(msg) + "\n")
@@ -118,7 +118,7 @@ def main() -> None:
     try:
         asyncio.run(_run())
     except Exception:
-        # WHY: surface fatal startup errors through the same stdout channel
+        # REASON: surface fatal startup errors through the same stdout channel
         # the host is already reading. If we just raised, the host would see
         # an unexplained non-zero exit.
         _write({"fatal": traceback.format_exc()})

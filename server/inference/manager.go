@@ -163,7 +163,7 @@ func (m *Manager) doLoad(ctx context.Context, name string) {
 	m.phase = ""
 
 	if err != nil {
-		// WHY: on loader failure stay in Ready, not Idle — the worker is
+		// REASON: on loader failure stay in Ready, not Idle — the worker is
 		// still up and willing to try a different model. Killing it on
 		// every failed load would make recovery needlessly expensive.
 		m.state = StateReady

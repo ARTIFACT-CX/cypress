@@ -227,7 +227,7 @@ pub async fn start_server(app: AppHandle, state: State<'_, ServerState>) -> Resu
                 // nor the close handler try to signal a stale group id
                 // that the OS may have already recycled for someone else.
                 g.pgid = None;
-                // WHY: only emit Error if we're still in Running. If stop_server
+                // REASON: only emit Error if we're still in Running. If stop_server
                 // flipped us to Stopping already, the exit is expected.
                 if matches!(g.status, ServerStatus::Running) {
                     let msg = match exit {
@@ -312,7 +312,7 @@ pub async fn stop_server(app: AppHandle, state: State<'_, ServerState>) -> Resul
     let graceful = if let Some(mut child) = child_opt {
         timeout(STOP_GRACE, child.wait()).await.is_ok()
     } else {
-        // WHY: no Child handle means the exit watcher owns it. We can't
+        // REASON: no Child handle means the exit watcher owns it. We can't
         // await cross-task, so poll the port instead — once it's free the
         // server has released its listener, which is all we actually care
         // about for the "port in use" failure mode.

@@ -246,7 +246,7 @@ export function ModelPicker() {
     pending !== null ||
     status.state === "loading" ||
     status.state === "starting";
-  // WHY: there's a small window between clicking a model and the worker
+  // REASON: there's a small window between clicking a model and the worker
   // emitting its first phase event where status.phase is empty. Without a
   // fallback the section would look frozen — show a generic "Preparing…"
   // until the real phase string arrives.
@@ -259,7 +259,7 @@ export function ModelPicker() {
   return (
     <div className="fixed bottom-4 left-4 flex max-w-xs flex-col gap-2 rounded-md border bg-card/80 p-3 text-xs backdrop-blur">
       <div className="font-medium text-foreground">Model</div>
-      {/* WHY: while a load is in flight the whole section is locked —
+      {/* REASON: while a load is in flight the whole section is locked —
           aria-busy + pointer-events-none on the inner list keeps clicks
           from queueing on top of an in-flight request, which previously
           caused noticeable lag from piled-up POSTs. The pending button
@@ -280,7 +280,7 @@ export function ModelPicker() {
               key={m.name}
               type="button"
               onClick={() => loadModel(m.name)}
-              // WHY: only `busy` truly disables the button. When the server
+              // REASON: only `busy` truly disables the button. When the server
               // isn't up we want the click to still fire so loadModel can
               // surface a toast ("Start the server first") — silently
               // disabling leaves the user wondering why nothing happens.
@@ -288,7 +288,7 @@ export function ModelPicker() {
               className={`group/model flex flex-col items-start rounded border px-2 py-1.5 text-left transition-all ${
                 isActive
                   ? "border-primary bg-primary/10 text-foreground"
-                  : // WHY: hover lifts the border to primary + nudges the row
+                  : // REASON: hover lifts the border to primary + nudges the row
                     // right one pixel and adds a soft ring so the user gets a
                     // clear "this is clickable" cue. Cursor-pointer is
                     // explicit because Tauri/macOS won't add it on buttons by

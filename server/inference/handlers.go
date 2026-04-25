@@ -41,7 +41,7 @@ func RegisterRoutes(mux *http.ServeMux, mgr *Manager) {
 			http.Error(w, "missing 'name'", http.StatusBadRequest)
 			return
 		}
-		// WHY: LoadModel returns as soon as the manager has flipped to
+		// REASON: LoadModel returns as soon as the manager has flipped to
 		// starting/loading; the actual blocking work (HF download, weight
 		// transfer) runs on a goroutine the manager owns. The UI drives
 		// completion via /status polling. Errors here are pre-flight only

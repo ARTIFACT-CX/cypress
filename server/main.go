@@ -33,7 +33,7 @@ func main() {
 	// in "idle" state — starting the Python worker or opening an audio
 	// pipeline happens later, in response to explicit UI commands.
 	inferenceMgr := inference.NewManager()
-	// WHY: inferenceMgr satisfies audio.InferenceClient (the interface
+	// REASON: inferenceMgr satisfies audio.InferenceClient (the interface
 	// declared inside the audio feature). Passing it as an interface
 	// keeps audio decoupled from inference's concrete type.
 	audioPipeline := audio.NewPipeline(inferenceMgr)

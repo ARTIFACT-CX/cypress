@@ -142,7 +142,7 @@ _HANDLERS: dict[str, Handler] = {
 
 
 async def _stdin_reader() -> asyncio.StreamReader:
-    # WHY: asyncio needs stdin wrapped as a StreamReader before we can
+    # REASON: asyncio needs stdin wrapped as a StreamReader before we can
     # await readline(). Without this wrapper, reading stdin blocks the
     # entire event loop and nothing else (audio socket, timers) can run.
     loop = asyncio.get_running_loop()

@@ -84,7 +84,7 @@ export function useToast(): ToastContextValue {
 // because the toast surface is small and we don't need composition yet.
 const VARIANT_STYLES: Record<ToastVariant, string> = {
   info: "border-border bg-card/90 text-foreground",
-  // WHY: warn used to be amber, but in practice most "warnings" here are
+  // REASON: warn used to be amber, but in practice most "warnings" here are
   // soft prompts ("start the server first") that don't warrant a loud
   // color. Muted grey reads as a neutral hint without alarming the user.
   warn: "border-border bg-card/90 text-muted-foreground",

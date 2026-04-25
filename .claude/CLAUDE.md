@@ -59,16 +59,18 @@ The Tauri/Go/Python service split stays as it is — feature slicing is the rule
 
 ### Comments
 
-Write **generous inline comments** that explain *what the code is doing and why* — not just mechanics, but the reasoning. Code should read top-to-bottom like a narrated walkthrough. A future maintainer should be able to understand the intent without reading the git history.
+Write **generous inline comments** that explain _what the code is doing and why_ — not just mechanics, but the reasoning. Code should read top-to-bottom like a narrated walkthrough. A future maintainer should be able to understand the intent without reading the git history.
 
 **Do:**
-- Explain the *process* at the top of each function / module (2-3 line header).
+
+- Explain the _process_ at the top of each function / module (2-3 line header).
 - Call out non-obvious decisions and tradeoffs inline.
 - Tag logical sections within long functions so they're easy to scan.
 
 **Don't:**
+
 - Restate trivial mechanics (`// increment i`).
-- Reference specific issues, tickets, or PRs ("fix for #42") — those rot. Explain the *reason* instead.
+- Reference specific issues, tickets, or PRs ("fix for #42") — those rot. Explain the _reason_ instead.
 
 ### Tags
 
@@ -81,11 +83,11 @@ Write **generous inline comments** that explain *what the code is doing and why*
 
 Format: `AREA: <domain> · <subsystem> [· <sub-subsystem>]`. Categories we'll use: `audio`, `models`, `transport`, `tools`, `ui`, `ipc`, `config`, `build`.
 
-**Inline tags** describe what a line/block *does*, not which feature it belongs to:
+**Inline tags** describe what a line/block _does_, not which feature it belongs to:
 
 - `// SETUP:` — initialization / configuration
 - `// STEP n:` — numbered steps within a process
-- `// WHY:` — explains a non-obvious decision
+- `// REASON:` — explains a non-obvious decision
 - `// SWAP:` — marks a module / interface designed to be replaced later (reader hint: don't inline it, don't tightly couple)
 - `// TODO:` — deferred work (include a clear next step)
 - `// PERF:` — performance-critical section
