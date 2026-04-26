@@ -3,19 +3,22 @@ import { ModelPicker } from "./components/ModelPicker";
 import { ServerControl } from "./components/ServerControl";
 import { VoiceButton } from "./components/VoiceButton";
 import { useChromaticAberration } from "./hooks/useChromaticAberration";
-import { useVoiceSession } from "./hooks/useVoiceSession";
+import { useVoiceStore } from "./store/voiceStore";
 
 function App() {
   const [logoRef, setLogoAudio] = useChromaticAberration<HTMLImageElement>();
-  // Hoist the voice session up so the page chrome (tagline, logo
-  // chromatic-aberration animation) can react to live state without
-  // VoiceButton having to publish anything externally.
-  const voice = useVoiceSession();
-  const live = voice.state === "live" || voice.state === "connecting";
-  // Pump audio level + live flag into the logo effect. While live, the
-  // hook ignores mouse and reacts only to audio (silent → no effect).
-  // While not live, it falls back to the original mouse-reactive mode.
-  setLogoAudio(Math.max(voice.micLevel, voice.playbackLevel), live);
+  // Read voice state directly from the store — no prop drilling.
+  // Each select is single-field so unrelated changes don't re-render
+  // the page chrome.
+  const sessionState = useVoiceStore((s) => s.state);
+  const micLevel = useVoiceStore((s) => s.micLevel);
+  const playbackLevel = useVoiceStore((s) => s.playbackLevel);
+  const live = sessionState === "live" || sessionState === "connecting";
+  // Pump audio level + live flag into the logo effect. While live,
+  // the hook ignores mouse and reacts only to audio (silent → no
+  // effect). While not live, it falls back to the original
+  // mouse-reactive mode.
+  setLogoAudio(Math.max(micLevel, playbackLevel), live);
   return (
     <>
       <div data-tauri-drag-region className="titlebar-drag" />
@@ -34,7 +37,7 @@ function App() {
       </main>
       <ModelPicker />
       <ServerControl />
-      <VoiceButton voice={voice} />
+      <VoiceButton />
     </>
   );
 }

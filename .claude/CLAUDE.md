@@ -193,6 +193,11 @@ Prefer a sequence of small, working changes over one big sweep. Each step should
 
 Don't create README, design docs, or summary markdown files unless explicitly asked. Work from conversation context.
 
+### Commit messages
+
+- **Do not add `Co-Authored-By: Claude` (or any Claude co-author trailer) to commit messages.** This overrides the default tool guidance. Commits should look authored by the human; the AI assistance is a tooling detail, not a credit.
+- Same rule for PR bodies: no "🤖 Generated with Claude Code" footer, no co-author trailer.
+
 ### Track progress on GitHub issues
 
 When work maps to an existing GitHub issue, post a progress comment on that issue as commits land — list the relevant commit SHAs and a short note on what's done vs still pending. Don't close the issue until it's actually finished end-to-end. Use `gh issue comment <n>` for the updates and `gh issue view <n>` first to confirm scope before commenting.

@@ -1,13 +1,12 @@
 // AREA: ui · VOICE · BUTTON
 // Tap-to-converse button + live transcript, fixed at the bottom of the
-// window. Owns one VoiceSession (via the hook) and surfaces its state
-// as a single circular control: idle, connecting, live (pulsing while
-// audio flows), error.
+// window. Reads voice state from the global store; the imperative
+// VoiceSession lives behind that store.
 //
 // Visibility rules:
-//   - The button only appears once a model is loaded (inference state =
-//     "serving"). Without a model, there's nothing for the user to talk
-//     to and the WS would just reject the session — better to hide.
+//   - The button only appears once the Tauri-managed server is running
+//     AND the inference manager reports a model serving with no error.
+//     Both gates come from the server store.
 //   - The transcript stays hidden until the user starts a conversation
 //     for the first time, then sticks around so they can read what was
 //     said after they tap to end.
@@ -17,52 +16,23 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Mic, MicOff, Loader2 } from "lucide-react";
-import type { useVoiceSession } from "../hooks/useVoiceSession";
+import { selectIsModelReady, useServerStore } from "../store/serverStore";
+import { useVoiceStore } from "../store/voiceStore";
 import { cn } from "../lib/utils";
 
-// Take the voice-session bag as a prop rather than calling the hook
-// internally. App owns the hook so page chrome (tagline, etc.) can read
-// the same state — without lifting we'd have two parallel sessions.
-type VoiceSessionApi = ReturnType<typeof useVoiceSession>;
+export function VoiceButton() {
+  // Voice state — single-field selectors so this component only
+  // re-renders when the relevant slice changes.
+  const state = useVoiceStore((s) => s.state);
+  const error = useVoiceStore((s) => s.error);
+  const transcript = useVoiceStore((s) => s.transcript);
+  const toggle = useVoiceStore((s) => s.toggle);
 
-// SETUP: Go server base URL. Same listenAddr as the rest of the app.
-// Polling /status here is redundant with ServerControl's poller, but the
-// frequency is low (1.5s) and keeping the gating logic self-contained
-// beats threading a context through just for one boolean.
-const SERVER_URL = "http://127.0.0.1:7842";
-const STATUS_POLL_MS = 1500;
+  // Visibility gate. modelReady covers both "Tauri server running"
+  // and "Go-side model loaded with no error" — see selectIsModelReady.
+  const modelReady = useServerStore(selectIsModelReady);
 
-type InferenceState = "idle" | "starting" | "ready" | "loading" | "serving";
-
-export function VoiceButton({ voice }: { voice: VoiceSessionApi }) {
-  const { state, error, transcript, micLevel, playbackLevel, toggle } = voice;
-
-  // STEP 1: gate visibility on whether a model is actually loaded. We
-  // poll /status rather than subscribing to events because the existing
-  // wire-format is "snapshot via fetch" (see ServerControl); a future
-  // server-status event-bus refactor would replace both pollers at once.
-  const [modelReady, setModelReady] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    const tick = () => {
-      fetch(`${SERVER_URL}/status`)
-        .then((r) => r.json())
-        .then((s: { state: InferenceState }) => {
-          if (!cancelled) setModelReady(s.state === "serving");
-        })
-        .catch(() => {
-          if (!cancelled) setModelReady(false);
-        });
-    };
-    tick();
-    const handle = setInterval(tick, STATUS_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(handle);
-    };
-  }, []);
-
-  // STEP 2: track whether the user has started a conversation at least
+  // STEP 1: track whether the user has started a conversation at least
   // once. Drives transcript visibility — we don't want an empty box
   // floating on first launch, but we do want the transcript to persist
   // after the user taps to end so they can read the last reply.
@@ -73,12 +43,6 @@ export function VoiceButton({ voice }: { voice: VoiceSessionApi }) {
 
   const live = state === "live";
   const busy = state === "connecting" || state === "closing";
-  // Levels are still surfaced on the hook for future use (e.g. an
-  // accessibility-friendly text indicator), but the button itself no
-  // longer animates with them — App routes the same signal into the
-  // logo's chromatic aberration instead.
-  void micLevel;
-  void playbackLevel;
 
   // Auto-scroll transcript to the newest token. Append-only stream, no
   // observer needed.

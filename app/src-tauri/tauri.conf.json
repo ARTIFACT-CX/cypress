@@ -15,8 +15,8 @@
         "title": "Cypress",
         "width": 1000,
         "height": 700,
-        "minWidth": 640,
-        "minHeight": 480,
+        "minWidth": 850,
+        "minHeight": 650,
         "theme": "Dark",
         "titleBarStyle": "Overlay",
         "hiddenTitle": true
