@@ -16,15 +16,50 @@
 import { create } from "zustand";
 import { VoiceSession, type SessionState } from "../lib/voiceSession";
 
-// Bounded transcript buffer. Inner-monologue tokens stream fast;
-// without a cap a long session would balloon the React tree. 400
-// entries ≈ a few minutes at Moshi's typical token rate.
-const MAX_TRANSCRIPT = 400;
+// Bounded turn history. Long sessions still need a cap so the React
+// tree doesn't balloon. 200 turns ≈ tens of minutes of back-and-forth.
+const MAX_TURNS = 200;
+
+// Turn-boundary heuristics. The model emits text tokens for the agent
+// path and we infer user turns from mic level (no ASR is happening).
+//
+//   - USER_GATE: smoothed mic level above this counts as the user
+//     speaking. The level is already smoothed in onMicLevel below;
+//     0.03 sits comfortably above ambient noise but below quiet talk.
+//   - TURN_GAP_MS: a same-role event arriving within this window of
+//     the previous one continues the current turn; outside it, we
+//     open a new turn. Same value for both sides — feels natural at
+//     conversation pace.
+//   - TURN_FLIP_DEBOUNCE_MS: while in turn X, a single brief event
+//     from role Y inside this window is ignored. Prevents one stray
+//     mic frame during agent playback from fragmenting the agent's
+//     turn into a "user → agent → user" chain.
+const USER_GATE = 0.03;
+const TURN_GAP_MS = 1500;
+const TURN_FLIP_DEBOUNCE_MS = 250;
+
+export type TurnRole = "user" | "agent";
+
+export type Turn = {
+  id: string;
+  role: TurnRole;
+  // For agent turns this accumulates the streamed text tokens.
+  // For user turns it stays empty — Moshi doesn't ASR the user input
+  // in this pipeline, so we render user bubbles as activity rather
+  // than text.
+  text: string;
+  startedAt: number;
+  endedAt: number | null;
+};
 
 type VoiceStore = {
   state: SessionState;
   error: string | null;
-  transcript: string[];
+  // Closed turns history. activeTurn (below) is shown alongside this
+  // in the UI; keeping them split avoids re-allocating the whole
+  // array on every token append.
+  turns: Turn[];
+  activeTurn: Turn | null;
   micLevel: number;
   playbackLevel: number;
 
@@ -48,7 +83,80 @@ let playTail = 0;
 const smooth = (prev: number, level: number) =>
   level > prev ? level : prev * 0.85 + level * 0.15;
 
+// Last-event timestamps (ms) used to decide whether an incoming
+// mic-active or text event extends the current turn or opens a new
+// one. Module-level instead of in the store so updating them doesn't
+// trigger a React re-render — they're plumbing, not view state.
+let lastUserActivityAt = 0;
+let lastAgentTextAt = 0;
+let turnSeq = 0;
+const newTurnId = () => `t${++turnSeq}`;
+
 export const useVoiceStore = create<VoiceStore>((set, get) => {
+  // Helpers operating on the live store. Kept inside the create
+  // closure so they can reach set/get without exposing them.
+
+  // Close out the active turn (if any), pushing it onto the history
+  // with an endedAt timestamp. Caps history at MAX_TURNS by dropping
+  // from the front so memory usage is bounded over a long session.
+  const closeActive = (now: number) => {
+    const { activeTurn, turns } = get();
+    if (!activeTurn) return;
+    const closed: Turn = { ...activeTurn, endedAt: now };
+    const next = turns.length + 1 > MAX_TURNS
+      ? [...turns.slice(turns.length - MAX_TURNS + 1), closed]
+      : [...turns, closed];
+    set({ activeTurn: null, turns: next });
+  };
+
+  // Open a fresh turn for the given role. Caller is responsible for
+  // closing any pre-existing active turn first (closeActive).
+  const openTurn = (role: TurnRole, now: number) => {
+    set({
+      activeTurn: {
+        id: newTurnId(),
+        role,
+        text: "",
+        startedAt: now,
+        endedAt: null,
+      },
+    });
+  };
+
+  // Replace the whole activeTurn object so React notices the change.
+  // Mutating in place would skip re-renders since zustand uses
+  // reference equality on the slice.
+  const appendTextToActive = (chunk: string) => {
+    const { activeTurn } = get();
+    if (!activeTurn) return;
+    set({ activeTurn: { ...activeTurn, text: activeTurn.text + chunk } });
+  };
+
+  // Decide what to do when a new event arrives for `role`. If we're
+  // already in a same-role turn within the gap window, extend it.
+  // Otherwise close the current turn and open a new one.
+  const ensureRole = (role: TurnRole, now: number): boolean => {
+    const { activeTurn } = get();
+    if (activeTurn && activeTurn.role === role) {
+      // Same role; reuse the open turn. Caller appends as needed.
+      return false;
+    }
+    if (activeTurn && activeTurn.endedAt === null) {
+      // Different role — but only flip if the *current* turn's last
+      // activity is old enough that a transient blip from the
+      // incoming role shouldn't fragment it. (Incoming role is `role`,
+      // so current turn role is the opposite.)
+      const currentTurnLastActivity =
+        role === "user" ? lastAgentTextAt : lastUserActivityAt;
+      if (now - currentTurnLastActivity < TURN_FLIP_DEBOUNCE_MS) {
+        return false;
+      }
+      closeActive(now);
+    }
+    openTurn(role, now);
+    return true;
+  };
+
   const ensureSession = (): VoiceSession => {
     if (session) return session;
     session = new VoiceSession({
@@ -56,18 +164,45 @@ export const useVoiceStore = create<VoiceStore>((set, get) => {
         set({ state: next });
         if (next === "error") set({ error: reason ?? "unknown error" });
         else if (next === "live") set({ error: null });
+        // STEP: close the in-flight turn whenever the session winds
+        // down. Without this the last bubble would render forever as
+        // "live" (no endedAt) until the user starts a new session.
+        if (next === "idle" || next === "closing" || next === "error") {
+          closeActive(Date.now());
+        }
       },
       onText: (chunk) => {
-        const prev = get().transcript;
-        const next =
-          prev.length + 1 > MAX_TRANSCRIPT
-            ? [...prev.slice(prev.length - MAX_TRANSCRIPT + 1), chunk]
-            : [...prev, chunk];
-        set({ transcript: next });
+        const now = Date.now();
+        // If we'd been quiet (or in a user turn) and this is the
+        // first agent token, ensureRole opens a new agent turn. Same
+        // role within the gap window just appends.
+        if (
+          !get().activeTurn ||
+          get().activeTurn?.role !== "agent" ||
+          now - lastAgentTextAt > TURN_GAP_MS
+        ) {
+          ensureRole("agent", now);
+        }
+        appendTextToActive(chunk);
+        lastAgentTextAt = now;
       },
       onMicLevel: (level) => {
         micTail = smooth(micTail, level);
         set({ micLevel: micTail });
+        // Treat the smoothed level crossing the gate as user activity.
+        // We use the raw incoming `level` (not the smoothed tail) so
+        // the turn opens promptly on the first loud frame, not after
+        // smoothing has caught up.
+        if (level < USER_GATE) return;
+        const now = Date.now();
+        if (
+          !get().activeTurn ||
+          get().activeTurn?.role !== "user" ||
+          now - lastUserActivityAt > TURN_GAP_MS
+        ) {
+          ensureRole("user", now);
+        }
+        lastUserActivityAt = now;
       },
       onPlaybackLevel: (level) => {
         playTail = smooth(playTail, level);
@@ -80,12 +215,18 @@ export const useVoiceStore = create<VoiceStore>((set, get) => {
   return {
     state: "idle",
     error: null,
-    transcript: [],
+    turns: [],
+    activeTurn: null,
     micLevel: 0,
     playbackLevel: 0,
 
     start: async () => {
-      set({ error: null, transcript: [] });
+      // Wipe transcript history when explicitly starting a fresh
+      // conversation. Stopping leaves history visible so the user
+      // can read what was said after they tap to end.
+      set({ error: null, turns: [], activeTurn: null });
+      lastUserActivityAt = 0;
+      lastAgentTextAt = 0;
       try {
         await ensureSession().start();
       } catch {
