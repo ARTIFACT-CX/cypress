@@ -77,7 +77,7 @@ func TestModelInfos_PopulatesAvailableAndDownloaded(t *testing.T) {
 	root := makeFakeRepo(t, entry.Repo, true)
 	t.Setenv("HUGGINGFACE_HUB_CACHE", root)
 
-	infos := ModelInfos()
+	infos := ModelInfos(nil)
 	var moshi *ModelInfo
 	for i := range infos {
 		if infos[i].Name == "moshi" {

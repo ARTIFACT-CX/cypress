@@ -26,9 +26,44 @@ func RegisterRoutes(mux *http.ServeMux, mgr *Manager) {
 	})
 
 	mux.HandleFunc("/models", func(w http.ResponseWriter, _ *http.Request) {
-		// Static catalog + a per-call HF cache probe. Cheap (a few
-		// stat()s) so we recompute on every request rather than caching.
-		writeJSON(w, http.StatusOK, map[string]any{"models": ModelInfos()})
+		// Static catalog + a per-call HF cache probe + any inflight
+		// downloads. Cheap (a few stat()s + a map snapshot) so we
+		// recompute per request rather than caching. The UI polls
+		// this for live download progress.
+		writeJSON(w, http.StatusOK, map[string]any{"models": mgr.ModelInfos()})
+	})
+
+	// REASON: scope download under the model's own path so the URL
+	// shape mirrors the action and avoids a {name} pattern colliding
+	// with a sibling literal "/models/download" (Go 1.22 ServeMux
+	// rejects that overlap at registration time).
+	mux.HandleFunc("POST /models/{name}/download", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if name == "" {
+			http.Error(w, "missing name", http.StatusBadRequest)
+			return
+		}
+		if err := mgr.DownloadModel(name); err != nil {
+			log.Printf("download_model %q rejected: %v", name, err)
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+			return
+		}
+		// 202: started, progress will land in /models entries.
+		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "name": name})
+	})
+
+	mux.HandleFunc("DELETE /models/{name}", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if name == "" {
+			http.Error(w, "missing name", http.StatusBadRequest)
+			return
+		}
+		if err := mgr.DeleteModel(name); err != nil {
+			log.Printf("delete_model %q rejected: %v", name, err)
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name})
 	})
 
 	mux.HandleFunc("/model/load", func(w http.ResponseWriter, r *http.Request) {

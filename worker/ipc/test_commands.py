@@ -688,3 +688,139 @@ async def test_run_loop_survives_handler_crash():
     assert "error" in out[0]
     assert out[1]["id"] == 2
     assert out[1]["ok"] is True
+
+
+# --- _handle_download_model -------------------------------------------------
+
+
+class _FakeHubInstaller:
+    """Stands in for huggingface_hub. Records calls and returns paths
+    inside the test's tmp dir so the download command can `os.path.getsize`
+    them without touching the network."""
+
+    def __init__(self, tmp_path, file_size: int = 100):
+        self.tmp_path = tmp_path
+        self.calls: list[tuple[str, str]] = []
+        self.file_size = file_size
+
+    def hf_hub_download(self, repo: str, filename: str, **_kw):
+        # Mirror HF's contract: returns the on-disk path of the file
+        # after fetching it. We just write a stub so getsize works.
+        self.calls.append((repo, filename))
+        path = self.tmp_path / repo.replace("/", "--") / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * self.file_size)
+        return str(path)
+
+    class _Sibling:
+        def __init__(self, name: str, size: int):
+            self.rfilename = name
+            self.size = size
+
+    def model_info(self, repo: str, **_kw):
+        # Return a stub object whose .siblings list mirrors HF's shape.
+        sibs = [self._Sibling("a", self.file_size), self._Sibling("b", self.file_size)]
+        return type("Info", (), {"siblings": sibs})()
+
+
+def _install_fake_hub(monkeypatch, fake: _FakeHubInstaller):
+    # huggingface_hub is imported inside the download task, not at the top
+    # of commands.py — so we have to inject a fake module before the task
+    # runs. sys.modules wins over real disk imports.
+    import sys, types
+
+    mod = types.ModuleType("huggingface_hub")
+    mod.hf_hub_download = fake.hf_hub_download
+    mod.HfApi = lambda: types.SimpleNamespace(model_info=fake.model_info)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", mod)
+
+
+async def test_download_model_rejects_missing_name():
+    reply = await commands._handle_download_model({"repo": "x", "files": ["a"]})
+    assert "error" in reply
+
+
+async def test_download_model_rejects_missing_repo():
+    reply = await commands._handle_download_model({"name": "moshi", "files": ["a"]})
+    assert "error" in reply
+
+
+async def test_download_model_rejects_empty_files():
+    reply = await commands._handle_download_model(
+        {"name": "moshi", "repo": "x", "files": []}
+    )
+    assert "error" in reply
+
+
+async def test_download_model_emits_progress_and_done(tmp_path, monkeypatch):
+    # Capture every event the command emits so we can assert the shape +
+    # ordering of progress / done events.
+    events: list[dict] = []
+    commands._write_fn = lambda msg: events.append(msg)
+    fake = _FakeHubInstaller(tmp_path, file_size=100)
+    _install_fake_hub(monkeypatch, fake)
+
+    reply = await commands._handle_download_model(
+        {"name": "moshi", "repo": "kyutai/x", "files": ["a", "b"]}
+    )
+    assert reply["ok"] is True
+
+    # Wait for the spawned task to finish so all events are in.
+    task = commands._state["download"]
+    await task
+
+    # Find the events we care about.
+    progress = [e for e in events if e["event"] == "download_progress"]
+    done = [e for e in events if e["event"] == "download_done"]
+
+    # At least one starting + one per-file progress + one done.
+    assert any(p["phase"] == "starting" for p in progress)
+    assert any(p["file"] == "a" for p in progress)
+    assert any(p["file"] == "b" for p in progress)
+    assert len(done) == 1
+    assert done[0]["totalBytes"] == 200  # two 100-byte files
+    assert len(done[0]["files"]) == 2
+    assert fake.calls == [("kyutai/x", "a"), ("kyutai/x", "b")]
+
+
+async def test_download_model_rejects_concurrent_runs():
+    # The "already in progress" check is structural — it just looks at
+    # whether _state["download"] is a non-done task. Inject a not-yet-done
+    # future directly so we don't have to race a real download to observe
+    # the rejection.
+    pending: asyncio.Future = asyncio.get_event_loop().create_future()
+    commands._state["download"] = pending
+    try:
+        reply = await commands._handle_download_model(
+            {"name": "moshi", "repo": "kyutai/x", "files": ["a"]}
+        )
+        assert "error" in reply
+        assert "already" in reply["error"]
+    finally:
+        pending.set_result(None)
+        commands._state["download"] = None
+
+
+async def test_download_model_emits_error_on_hf_failure(tmp_path, monkeypatch):
+    events: list[dict] = []
+    commands._write_fn = lambda msg: events.append(msg)
+    fake = _FakeHubInstaller(tmp_path)
+    fake.hf_hub_download = lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("network down")
+    )
+    _install_fake_hub(monkeypatch, fake)
+
+    await commands._handle_download_model(
+        {"name": "moshi", "repo": "kyutai/x", "files": ["a"]}
+    )
+    await commands._state["download"]
+
+    errs = [e for e in events if e["event"] == "download_error"]
+    assert len(errs) == 1
+    assert "network down" in errs[0]["error"]
+
+
+async def test_cancel_download_is_noop_when_idle():
+    commands._state["download"] = None
+    reply = await commands._handle_cancel_download({})
+    assert reply == {"ok": True, "active": False}

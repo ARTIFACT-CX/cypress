@@ -27,6 +27,11 @@ import (
 // worker forever and silently swallow further requests.
 const loadTimeout = 15 * time.Minute
 
+// downloadTimeout caps a single download. Same rationale as loadTimeout
+// but a bit more generous since download alone (without subsequent
+// load) is the whole budget here.
+const downloadTimeout = 20 * time.Minute
+
 // State is the public lifecycle of the inference subsystem. The UI polls
 // this to render "loading…", enable/disable buttons, etc.
 type State string
@@ -81,6 +86,17 @@ type Manager struct {
 	// worker. nil when idle. Guarded by mu — see stream.go for the
 	// lifecycle hooks (StartStream / detachStream).
 	activeStream *Stream
+
+	// manifest is the on-disk record of installed models. Owned by the
+	// manager so download completion can update it under mu without an
+	// extra lock. nil-safe: a nil manifest just means we can't persist
+	// installs (used in unit tests that don't care about disk state).
+	manifest *Manifest
+
+	// inflightDownloads tracks live download progress per model name,
+	// keyed for quick lookup when the worker emits download_progress
+	// events. Cleared on download_done / download_error / cancellation.
+	inflightDownloads map[string]*DownloadProgress
 }
 
 // Snapshot is the Manager's external view — what the HTTP /status endpoint
@@ -99,14 +115,33 @@ type Snapshot struct {
 // NewManager builds a Manager in the idle state. Starting the worker is
 // deferred until the UI asks for a model — spawning Python at server boot
 // would add seconds of latency before the UI could even connect.
+//
+// The manifest is opened eagerly because it's tiny (a JSON file) and
+// the catalog endpoint needs it the moment the UI opens. A failure to
+// open the manifest is logged but non-fatal — we degrade to a memory-
+// only manifest so the rest of the server still runs.
 func NewManager() *Manager {
-	return &Manager{state: StateIdle, spawn: defaultSpawn}
+	mf, err := NewManifest()
+	if err != nil {
+		log.Printf("manifest open failed (continuing without persistence): %v", err)
+		mf = nil
+	}
+	return &Manager{
+		state:             StateIdle,
+		spawn:             defaultSpawn,
+		manifest:          mf,
+		inflightDownloads: map[string]*DownloadProgress{},
+	}
 }
 
 // newManagerWithSpawn is the test constructor. Lets a unit test inject a
 // fake spawner without going through subprocess machinery.
 func newManagerWithSpawn(spawn spawnFn) *Manager {
-	return &Manager{state: StateIdle, spawn: spawn}
+	return &Manager{
+		state:             StateIdle,
+		spawn:             spawn,
+		inflightDownloads: map[string]*DownloadProgress{},
+	}
 }
 
 // defaultSpawn adapts the package's real spawnWorker (which returns the
@@ -238,6 +273,12 @@ func (m *Manager) handleEvent(msg map[string]any) {
 		// lives in stream.go to keep base64 / chunk-shape concerns out
 		// of the lifecycle state machine.
 		m.dispatchStreamEvent(msg)
+	case "download_progress", "download_done", "download_error":
+		// Download lifecycle events update the inflightDownloads map
+		// and (on completion) write the manifest entry. Routing lives
+		// in downloads.go to keep that state machine separate from
+		// the load state machine.
+		m.handleDownloadEvent(event, msg)
 	}
 }
 

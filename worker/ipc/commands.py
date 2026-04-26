@@ -28,6 +28,7 @@ modules (model commands, audio commands, tool commands) and compose them.
 import asyncio
 import base64
 import json
+import os
 import sys
 from typing import Any, Awaitable, Callable
 
@@ -45,6 +46,9 @@ _state: dict[str, Any] = {
     # task runs alongside, pulling output chunks and emitting events.
     "stream": None,  # MoshiStream-shaped session instance, or None.
     "stream_drain": None,  # asyncio.Task draining session → audio_out events.
+    # Active download task (asyncio.Task) for download_model. At most one
+    # at a time so we don't hammer HF with parallel multi-GB pulls.
+    "download": None,
 }
 
 # SETUP: dependencies wired in by run_loop. Stashing them as module
@@ -245,6 +249,237 @@ async def _handle_audio_in(msg: dict) -> dict:
     return {"ok": True}
 
 
+async def _handle_download_model(msg: dict) -> dict:
+    # Pull a model's weight files into the HF hub cache without loading
+    # them. The host (Go server) supplies the repo + file list because
+    # the Go-side catalog is the single source of truth for which model
+    # maps to which files. Worker is a dumb downloader here.
+    #
+    # Progress is reported as `download_progress` events with
+    # cumulative byte counts; completion as `download_done`. At most
+    # one download runs at a time — second concurrent call rejects.
+    name = msg.get("name")
+    repo = msg.get("repo")
+    files = msg.get("files")
+    revision = msg.get("revision")  # optional — None means HF's default
+    if not isinstance(name, str) or not name:
+        return {"error": "missing or invalid 'name'"}
+    if not isinstance(repo, str) or not repo:
+        return {"error": "missing or invalid 'repo'"}
+    if not isinstance(files, list) or not files or not all(
+        isinstance(f, str) and f for f in files
+    ):
+        return {"error": "missing or invalid 'files'"}
+    if revision is not None and not isinstance(revision, str):
+        return {"error": "invalid 'revision' (expected string or null)"}
+
+    # Reject concurrent downloads. Two parallel multi-GB pulls would
+    # both saturate the connection and confuse the manifest writer.
+    if _state["download"] is not None and not _state["download"].done():
+        return {"error": "another download is already in progress"}
+
+    _state["download"] = asyncio.create_task(
+        _run_download(name, repo, files, revision), name="ipc-download"
+    )
+    # Return immediately; progress streams as events. Caller correlates
+    # via `name` in the events.
+    return {"ok": True, "started": True}
+
+
+async def _run_download(
+    name: str, repo: str, files: list[str], revision: str | None
+) -> None:
+    """Worker→host pump for one model download. Runs as a task spawned
+    by download_model; emits progress events and a final download_done
+    or download_error event. Never returns a value to a waiter — the
+    handler reply went out the moment the task was scheduled."""
+    try:
+        # STEP 1: probe each file's size up front so the UI has a real
+        # total to render against. HF's HfApi.model_info returns sibling
+        # file metadata including LFS sizes; we sum the requested files.
+        from huggingface_hub import HfApi, hf_hub_download
+
+        def _probe_total() -> int:
+            api = HfApi()
+            info = api.model_info(repo, revision=revision, files_metadata=True)
+            sizes: dict[str, int] = {}
+            for s in (info.siblings or []):
+                size = getattr(s, "size", None) or getattr(s, "lfs", None)
+                if hasattr(size, "size"):  # lfs object
+                    size = size.size
+                sizes[s.rfilename] = int(size or 0)
+            return sum(sizes.get(f, 0) for f in files)
+
+        try:
+            total = await asyncio.to_thread(_probe_total)
+        except Exception:
+            # Probing is a polish feature; if HF's API is down or the
+            # repo lacks size metadata, fall through with total=0 and
+            # the UI just renders an indeterminate phase progress.
+            total = 0
+
+        emit_event(
+            {
+                "event": "download_progress",
+                "name": name,
+                "phase": "starting",
+                "downloaded": 0,
+                "total": total,
+                "file": "",
+                "fileIndex": 0,
+                "fileCount": len(files),
+            }
+        )
+
+        # STEP 2: pull each file in turn. hf_hub_download is cache-
+        # aware, so files already on disk return immediately. Cumulative
+        # bytes track from on-disk file sizes once each finishes — gives
+        # a step-function progress bar that's honest about what's done.
+        # REASON: hf_hub_download is one blocking call with no progress
+        # callback exposed cleanly across HF versions, so during each
+        # file we run a polling task that watches `<cache>/.../blobs/
+        # *.incomplete` and emits live byte counts. The poller dies
+        # when the download task finishes (or errors).
+        import glob
+
+        # Resolve cache root with the same precedence HF uses, but
+        # tolerate huggingface_hub.constants being absent (test fakes
+        # only stub the top-level module).
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE as _hub_cache
+        except Exception:
+            _hub_cache = (
+                os.environ.get("HUGGINGFACE_HUB_CACHE")
+                or os.path.join(
+                    os.environ.get("HF_HOME")
+                    or os.path.expanduser("~/.cache/huggingface"),
+                    "hub",
+                )
+            )
+        repo_blobs = os.path.join(
+            _hub_cache,
+            "models--" + repo.replace("/", "--"),
+            "blobs",
+        )
+
+        downloaded_bytes = 0
+        local_paths: list[str] = []
+        for idx, fname in enumerate(files):
+            base_completed = downloaded_bytes
+            emit_event(
+                {
+                    "event": "download_progress",
+                    "name": name,
+                    "phase": "downloading",
+                    "downloaded": downloaded_bytes,
+                    "total": total,
+                    "file": fname,
+                    "fileIndex": idx,
+                    "fileCount": len(files),
+                }
+            )
+
+            # Poller: every 500ms, sum sizes of *.incomplete blobs and
+            # emit a fresh progress event so the UI bar moves while the
+            # blocking hf_hub_download chugs through a multi-GB file.
+            stop_poll = asyncio.Event()
+
+            async def _poll_progress(file_idx=idx, file_name=fname, base=base_completed):
+                # SAFETY: skip emit when bytes haven't moved so the UI store
+                # doesn't churn on every 500ms tick — same shape as the
+                # change-detection guards on the Go side.
+                last_downloaded = -1
+                while not stop_poll.is_set():
+                    cur = 0
+                    try:
+                        for p in glob.glob(os.path.join(repo_blobs, "*.incomplete")):
+                            try:
+                                cur += os.path.getsize(p)
+                            except OSError:
+                                pass
+                    except OSError:
+                        pass
+                    downloaded = base + cur
+                    if downloaded != last_downloaded:
+                        last_downloaded = downloaded
+                        emit_event(
+                            {
+                                "event": "download_progress",
+                                "name": name,
+                                "phase": "downloading",
+                                "downloaded": downloaded,
+                                "total": total,
+                                "file": file_name,
+                                "fileIndex": file_idx,
+                                "fileCount": len(files),
+                            }
+                        )
+                    try:
+                        await asyncio.wait_for(stop_poll.wait(), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        pass
+
+            poller = asyncio.create_task(_poll_progress())
+            try:
+                path = await asyncio.to_thread(
+                    hf_hub_download, repo, fname, revision=revision
+                )
+            finally:
+                stop_poll.set()
+                try:
+                    await poller
+                except Exception:
+                    pass
+            local_paths.append(path)
+            try:
+                downloaded_bytes += os.path.getsize(path)
+            except OSError:
+                # File should exist after a successful return, but if
+                # the FS lies don't crash the download — just stop
+                # incrementing. The completion event still fires.
+                pass
+
+        emit_event(
+            {
+                "event": "download_done",
+                "name": name,
+                "repo": repo,
+                "revision": revision,
+                "files": local_paths,
+                "totalBytes": downloaded_bytes,
+            }
+        )
+    except asyncio.CancelledError:
+        emit_event(
+            {"event": "download_error", "name": name, "error": "cancelled"}
+        )
+        raise
+    except Exception as e:
+        emit_event(
+            {
+                "event": "download_error",
+                "name": name,
+                "error": f"{type(e).__name__}: {e}",
+            }
+        )
+
+
+async def _handle_cancel_download(_msg: dict) -> dict:
+    # Idempotent: cancelling with no active download is a no-op. The
+    # download task surfaces a download_error event on its way out so
+    # the host's progress state always lands in a terminal value.
+    task = _state["download"]
+    if task is None or task.done():
+        return {"ok": True, "active": False}
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+    _state["download"] = None
+    return {"ok": True, "active": True}
+
+
 async def _handle_stop_stream(_msg: dict) -> dict:
     # Idempotent: stop_stream with no active session is a no-op, not an
     # error. Lets the host call it defensively (e.g. from a "hang up"
@@ -325,6 +560,8 @@ _HANDLERS: dict[str, Handler] = {
     "start_stream": _handle_start_stream,
     "audio_in": _handle_audio_in,
     "stop_stream": _handle_stop_stream,
+    "download_model": _handle_download_model,
+    "cancel_download": _handle_cancel_download,
 }
 
 

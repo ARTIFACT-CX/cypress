@@ -29,12 +29,19 @@ let unlistenServer: UnlistenFn | null = null;
 let pollHandle: ReturnType<typeof setTimeout> | null = null;
 
 function pollDelay(): number | null {
-  const { status, inference, pendingModel } = useServerStore.getState();
+  const { status, inference, pendingModel, models } = useServerStore.getState();
   if (status.state !== "running") return null;
+  // Fast cadence covers any transient state the user is waiting on:
+  // a load in progress (phase events), a pending click, or a live
+  // download (progress bytes). 500ms keeps the bar smooth without
+  // hammering the server.
+  const downloading = models.some((m) => m.download?.phase === "downloading"
+    || m.download?.phase === "starting");
   if (
     pendingModel !== null ||
     inference.state === "loading" ||
-    inference.state === "starting"
+    inference.state === "starting" ||
+    downloading
   ) {
     return POLL_FAST_MS;
   }
@@ -48,6 +55,13 @@ async function pollOnce() {
     useServerStore.getState().setInference(snap);
   } catch {
     // Server might be mid-restart; just try again on next tick.
+  }
+  // While any download is active we also re-pull /models on each tick
+  // so byte-progress + phase render live. When idle we skip — /models
+  // is recomputed from disk every call which is cheap but not free.
+  const { models } = useServerStore.getState();
+  if (models.some((m) => m.download && m.download.phase !== "error")) {
+    await fetchModels();
   }
 }
 

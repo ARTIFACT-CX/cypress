@@ -55,6 +55,19 @@ const EMPTY_SNAPSHOT: InferenceSnapshot = {
   phase: "",
 };
 
+// Per-download progress, mirrored from server/inference/catalog.go's
+// DownloadProgress. Total stays 0 if HF didn't return file sizes (rare
+// but possible) — the UI renders an indeterminate state in that case.
+export type DownloadProgress = {
+  phase: "starting" | "downloading" | "error";
+  file: string;
+  fileIndex: number;
+  fileCount: number;
+  downloaded: number;
+  total: number;
+  error?: string;
+};
+
 // Catalog row mirrored from server/inference/catalog.go's ModelInfo.
 // Refreshed on a slow timer alongside the inference snapshot so the
 // "downloaded" badge updates after a successful load without forcing
@@ -65,10 +78,12 @@ export type ModelInfo = {
   hint: string;
   backend: string;
   repo: string;
+  files: string[];
   sizeGb: string;
   requirements: string;
   available: boolean;
   downloaded: boolean;
+  download?: DownloadProgress;
 };
 
 type ServerStore = {
@@ -94,6 +109,8 @@ type ServerStore = {
   startServer: () => Promise<void>;
   stopServer: () => Promise<void>;
   loadModel: (name: string) => Promise<void>;
+  downloadModel: (name: string) => Promise<void>;
+  deleteModel: (name: string) => Promise<void>;
 };
 
 export const useServerStore = create<ServerStore>((set, get) => ({
@@ -157,6 +174,60 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       set({ pendingModel: null });
       throw e;
     }
+  },
+  downloadModel: async (name) => {
+    // Fire-and-forget at the HTTP level — the 202 lands quickly and
+    // progress streams through /models polling. Optimistically seed a
+    // local "starting" entry so the UI flips to "downloading…"
+    // immediately, before the bootstrap poller catches up.
+    const { models } = get();
+    set({
+      models: models.map((m) =>
+        m.name === name
+          ? {
+              ...m,
+              download: {
+                phase: "starting",
+                file: "",
+                fileIndex: 0,
+                fileCount: m.files.length || 1,
+                downloaded: 0,
+                total: 0,
+              },
+            }
+          : m,
+      ),
+    });
+    const res = await fetch(
+      `${SERVER_URL}/models/${encodeURIComponent(name)}/download`,
+      { method: "POST" },
+    );
+    if (!res.ok) {
+      // Roll the optimistic state back so the user sees the failure
+      // landing on this row, not lingering as a hung download.
+      const body = await res.json().catch(() => ({}));
+      const after = get().models.map((m) =>
+        m.name === name ? { ...m, download: undefined } : m,
+      );
+      set({ models: after });
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+  },
+  deleteModel: async (name) => {
+    const res = await fetch(
+      `${SERVER_URL}/models/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    // Optimistic update: flip downloaded false locally so the UI
+    // reflects the delete before the next /models poll lands.
+    const after = get().models.map((m) =>
+      m.name === name ? { ...m, downloaded: false } : m,
+    );
+    set({ models: after });
   },
 }));
 
