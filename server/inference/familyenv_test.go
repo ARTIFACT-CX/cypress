@@ -15,15 +15,14 @@ import (
 	"time"
 )
 
-// setupFamilyTree wires a worker tree under a tmpdir, registers it via
-// CYPRESS_WORKER_DIR so workerRootDir() points here, and pre-creates
+// setupFamilyTree wires a worker tree under a tmpdir and pre-creates
 // worker/models/<family>/pyproject.toml so the real defaultSyncFamily
 // path could find it (we still inject a fake sync in most tests).
-// Returns the .venv path the family code will look for.
-func setupFamilyTree(t *testing.T, family string) string {
+// Returns (workerDir, venvPath); caller assigns m.workerDir = workerDir
+// on the Manager under test so per-family code looks at this tree.
+func setupFamilyTree(t *testing.T, family string) (string, string) {
 	t.Helper()
 	root := t.TempDir()
-	t.Setenv("CYPRESS_WORKER_DIR", root)
 	famDir := filepath.Join(root, "models", family)
 	if err := os.MkdirAll(famDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -31,16 +30,17 @@ func setupFamilyTree(t *testing.T, family string) string {
 	if err := os.WriteFile(filepath.Join(famDir, "pyproject.toml"), []byte("[project]\nname=\"x\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return filepath.Join(famDir, ".venv")
+	return root, filepath.Join(famDir, ".venv")
 }
 
 func TestEnsureFamilyEnv_SkipsSyncWhenVenvExists(t *testing.T) {
-	venvPath := setupFamilyTree(t, "moshi")
+	root, venvPath := setupFamilyTree(t, "moshi")
 	if err := os.MkdirAll(venvPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	var calls int32
 	m := newManagerWithSpawn(nil)
+	m.workerDir = root
 	m.syncFamily = func(_ context.Context, _ string) error {
 		atomic.AddInt32(&calls, 1)
 		return nil
@@ -55,9 +55,10 @@ func TestEnsureFamilyEnv_SkipsSyncWhenVenvExists(t *testing.T) {
 }
 
 func TestEnsureFamilyEnv_RunsSyncWhenVenvMissing(t *testing.T) {
-	setupFamilyTree(t, "moshi")
+	root, _ := setupFamilyTree(t, "moshi")
 	var calls int32
 	m := newManagerWithSpawn(nil)
+	m.workerDir = root
 	m.syncFamily = func(_ context.Context, family string) error {
 		if family != "moshi" {
 			t.Errorf("family = %q, want moshi", family)
@@ -80,9 +81,10 @@ func TestEnsureFamilyEnv_SerializesConcurrentCallsForSameFamily(t *testing.T) {
 	// second one observes the first's freshly-created venv on the
 	// re-check path. We model that by having syncFamily create the
 	// venv on its only invocation.
-	venvPath := setupFamilyTree(t, "moshi")
+	root, venvPath := setupFamilyTree(t, "moshi")
 	var calls int32
 	m := newManagerWithSpawn(nil)
+	m.workerDir = root
 	m.syncFamily = func(_ context.Context, _ string) error {
 		atomic.AddInt32(&calls, 1)
 		// Simulate uv sync's actual side effect (creating the venv
@@ -109,11 +111,12 @@ func TestEnsureFamilyEnv_SerializesConcurrentCallsForSameFamily(t *testing.T) {
 }
 
 func TestMaybeRemoveFamilyEnv_RemovesWhenLastModelDeleted(t *testing.T) {
-	venvPath := setupFamilyTree(t, "moshi")
+	root, venvPath := setupFamilyTree(t, "moshi")
 	if err := os.MkdirAll(venvPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	m := newTestDownloadManager(t, &fakeWorker{})
+	m.workerDir = root
 
 	m.maybeRemoveFamilyEnv("moshi")
 
@@ -127,12 +130,13 @@ func TestMaybeRemoveFamilyEnv_KeepsWhenWorkerBusy(t *testing.T) {
 	// .venv files; pulling them would crash mid-call.
 	for _, state := range []State{StateLoading, StateServing} {
 		t.Run(string(state), func(t *testing.T) {
-			venvPath := setupFamilyTree(t, "moshi")
+			root, venvPath := setupFamilyTree(t, "moshi")
 			if err := os.MkdirAll(venvPath, 0o755); err != nil {
 				t.Fatal(err)
 			}
 			fake := &fakeWorker{}
 			m := newTestDownloadManager(t, fake)
+			m.workerDir = root
 			m.mu.Lock()
 			m.worker = fake
 			m.workerFamily = "moshi"
@@ -152,7 +156,7 @@ func TestMaybeRemoveFamilyEnv_StopsIdleWorkerThenRemoves(t *testing.T) {
 	// After a download leaves the worker idle (StateReady) and the
 	// last family model is then deleted, the cleanup must stop the
 	// worker so its open file handles release before we drop .venv.
-	venvPath := setupFamilyTree(t, "moshi")
+	root, venvPath := setupFamilyTree(t, "moshi")
 	if err := os.MkdirAll(venvPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -162,6 +166,7 @@ func TestMaybeRemoveFamilyEnv_StopsIdleWorkerThenRemoves(t *testing.T) {
 		return nil
 	}}
 	m := newTestDownloadManager(t, fake)
+	m.workerDir = root
 	m.mu.Lock()
 	m.worker = fake
 	m.workerFamily = "moshi"
@@ -191,11 +196,12 @@ func TestMaybeRemoveFamilyEnv_KeepsWhenSiblingInstalled(t *testing.T) {
 	// arbitrary names from prior installs (e.g. an explicit moshi-mlx
 	// download). The test seeds a sibling that maps to the same family
 	// via the catalog so the family-set check trips.
-	venvPath := setupFamilyTree(t, "moshi")
+	root, venvPath := setupFamilyTree(t, "moshi")
 	if err := os.MkdirAll(venvPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	m := newTestDownloadManager(t, &fakeWorker{})
+	m.workerDir = root
 	if err := m.manifest.Put(ManifestEntry{Name: "moshi", Repo: "kyutai/moshiko"}); err != nil {
 		t.Fatal(err)
 	}
@@ -208,11 +214,12 @@ func TestMaybeRemoveFamilyEnv_KeepsWhenSiblingInstalled(t *testing.T) {
 }
 
 func TestMaybeRemoveFamilyEnv_KeepsWhenSiblingDownloading(t *testing.T) {
-	venvPath := setupFamilyTree(t, "moshi")
+	root, venvPath := setupFamilyTree(t, "moshi")
 	if err := os.MkdirAll(venvPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	m := newTestDownloadManager(t, &fakeWorker{})
+	m.workerDir = root
 	m.mu.Lock()
 	m.inflightDownloads["moshi"] = &DownloadProgress{Phase: "downloading"}
 	m.mu.Unlock()

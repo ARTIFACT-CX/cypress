@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -88,7 +89,18 @@ func main() {
 	// STEP 1: build the long-lived feature components. Each one is created
 	// in "idle" state — starting the Python worker or opening an audio
 	// pipeline happens later, in response to explicit UI commands.
-	inferenceMgr := inference.NewManager()
+	workerDir, err := resolveWorkerDir()
+	if err != nil {
+		log.Fatalf("resolve worker dir: %v", err)
+	}
+	dataDir, err := resolveDataDir()
+	if err != nil {
+		log.Fatalf("resolve data dir: %v", err)
+	}
+	inferenceMgr := inference.NewManager(inference.Config{
+		WorkerDir: workerDir,
+		DataDir:   dataDir,
+	})
 	// REASON: inferenceMgr satisfies audio.InferenceClient (the interface
 	// declared inside the audio feature). Passing it as an interface
 	// keeps audio decoupled from inference's concrete type.
@@ -143,6 +155,48 @@ func main() {
 		log.Printf("http shutdown error: %v", err)
 	}
 	log.Println("bye")
+}
+
+// resolveWorkerDir locates the worker/ scaffold root. In a packaged
+// build the binary lives next to a worker/ resources directory, so we
+// look there first. In dev the server runs with cwd = server/, so the
+// worker is a sibling of the cwd. Returning a clear error rather than
+// silently falling back keeps misconfiguration loud.
+//
+// REASON: this used to be CYPRESS_WORKER_DIR-controlled, but no end
+// user should be configuring this — it's a layout fact about the
+// installed app. Tests bypass it by passing paths to NewManager directly.
+func resolveWorkerDir() (string, error) {
+	if exe, err := os.Executable(); err == nil {
+		// STEP 1: packaged-app layout. The Tauri build colocates the
+		// worker tree as <exe>/../worker.
+		candidate := filepath.Join(filepath.Dir(exe), "worker")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate, nil
+		}
+	}
+	// STEP 2: dev layout. `go run ./...` from server/ puts cwd at
+	// server/, so the worker tree is one directory up.
+	abs, err := filepath.Abs("../worker")
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(abs); err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+// resolveDataDir picks ~/.cypress as the metadata root. We don't nest
+// under HF's cache dir because that's HF-managed — our manifest is
+// ours and we shouldn't rely on a third-party tool not deciding to
+// scrub directories it doesn't recognize.
+func resolveDataDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".cypress"), nil
 }
 
 // withCORS wraps the mux with permissive CORS headers. Safe because the

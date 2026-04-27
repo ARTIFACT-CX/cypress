@@ -16,8 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 )
@@ -59,9 +57,9 @@ type workerHandle interface {
 }
 
 // spawnFn is the constructor for a workerHandle. NewManager defaults this
-// to the real spawnWorker; tests inject a fake. The family argument
-// selects which per-family Python venv (worker/models/<family>/.venv)
-// the subprocess is launched from.
+// to a closure over the configured workerDir; tests inject a fake. The
+// family argument selects which per-family Python venv
+// (worker/models/<family>/.venv) the subprocess is launched from.
 type spawnFn func(ctx context.Context, family string) (workerHandle, error)
 
 // Manager is the Go-side handle to the Python inference worker.
@@ -118,6 +116,26 @@ type Manager struct {
 	// shelling out. SWAP seam for a future packaged build that ships
 	// a pre-baked venv and wants this to be a no-op.
 	syncFamily func(ctx context.Context, family string) error
+
+	// workerDir is the resolved path to the worker/ scaffold root. Used
+	// to locate per-family venvs (workerDir/models/<family>/.venv) and
+	// for the spawned process's cwd. Injected via Config so tests can
+	// point at a tmpdir and the composition root can resolve a packaged-
+	// app path via os.Executable() without this package knowing how.
+	workerDir string
+}
+
+// Config is the composition-root contract for building a Manager.
+// Both fields are required in production; tests construct Managers via
+// the package-internal helpers below and don't go through Config.
+type Config struct {
+	// WorkerDir points at the worker/ scaffold (Python entrypoint +
+	// models/<family>/.venv subtrees). main.go resolves this from
+	// os.Executable() so a packaged app finds the bundled worker tree.
+	WorkerDir string
+	// DataDir points at Cypress's metadata root (manifest, future
+	// settings). main.go resolves this to ~/.cypress in production.
+	DataDir string
 }
 
 // Snapshot is the Manager's external view — what the HTTP /status endpoint
@@ -141,16 +159,25 @@ type Snapshot struct {
 // the catalog endpoint needs it the moment the UI opens. A failure to
 // open the manifest is logged but non-fatal — we degrade to a memory-
 // only manifest so the rest of the server still runs.
-func NewManager() *Manager {
-	mf, err := NewManifest()
+func NewManager(cfg Config) *Manager {
+	mf, err := NewManifest(cfg.DataDir)
 	if err != nil {
 		log.Printf("manifest open failed (continuing without persistence): %v", err)
 		mf = nil
 	}
+	workerDir := cfg.WorkerDir
 	return &Manager{
-		state:             StateIdle,
-		spawn:             defaultSpawn,
-		syncFamily:        defaultSyncFamily,
+		state:     StateIdle,
+		workerDir: workerDir,
+		// REASON: close over workerDir so the spawn/syncFamily defaults
+		// remain context.Context-only at the call sites — Manager
+		// internals don't need to thread the path through every call.
+		spawn: func(ctx context.Context, family string) (workerHandle, error) {
+			return spawnWorker(ctx, workerDir, family)
+		},
+		syncFamily: func(ctx context.Context, family string) error {
+			return defaultSyncFamily(ctx, workerDir, family)
+		},
 		manifest:          mf,
 		inflightDownloads: map[string]*DownloadProgress{},
 		familySetupMu:     map[string]*sync.Mutex{},
@@ -159,7 +186,8 @@ func NewManager() *Manager {
 
 // newManagerWithSpawn is the test constructor. Lets a unit test inject a
 // fake spawner without going through subprocess machinery. syncFamily
-// defaults to a no-op so tests don't need a real uv on PATH.
+// defaults to a no-op so tests don't need a real uv on PATH. Tests that
+// exercise venv lifecycle paths set m.workerDir directly afterwards.
 func newManagerWithSpawn(spawn spawnFn) *Manager {
 	return &Manager{
 		state:             StateIdle,
@@ -168,12 +196,6 @@ func newManagerWithSpawn(spawn spawnFn) *Manager {
 		inflightDownloads: map[string]*DownloadProgress{},
 		familySetupMu:     map[string]*sync.Mutex{},
 	}
-}
-
-// defaultSpawn adapts the package's real spawnWorker (which returns the
-// concrete *worker) into the workerHandle interface Manager depends on.
-func defaultSpawn(ctx context.Context, family string) (workerHandle, error) {
-	return spawnWorker(ctx, family)
 }
 
 // LoadModel kicks off a model load. Returns synchronously as soon as the
@@ -382,14 +404,3 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	}
 }
 
-// workerRootDir resolves the worker/ directory. In dev the server runs
-// with cwd = server/, so the worker is a sibling. CYPRESS_WORKER_DIR
-// overrides this for tests and packaged builds where the layout differs.
-// Per-family venvs live under <root>/models/<family>/.venv.
-func workerRootDir() string {
-	if env := os.Getenv("CYPRESS_WORKER_DIR"); env != "" {
-		return env
-	}
-	abs, _ := filepath.Abs("../worker")
-	return abs
-}

@@ -24,9 +24,6 @@ import (
 // without hardcoding paths.
 func findWorkerDir(t *testing.T) string {
 	t.Helper()
-	if env := os.Getenv("CYPRESS_WORKER_DIR"); env != "" {
-		return env
-	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -49,14 +46,11 @@ func findWorkerDir(t *testing.T) string {
 // handshake, one round-trip, and clean shutdown all work.
 func TestIntegration_Spawn_HandshakeAndStatus(t *testing.T) {
 	dir := findWorkerDir(t)
-	// spawnWorker resolves the venv via workerRootDir(); steer it at the
-	// test's worker tree so we don't depend on the dev server cwd.
-	t.Setenv("CYPRESS_WORKER_DIR", dir)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	w, err := spawnWorker(ctx, "moshi")
+	w, err := spawnWorker(ctx, dir, "moshi")
 	if err != nil {
 		t.Fatalf("spawnWorker: %v", err)
 	}

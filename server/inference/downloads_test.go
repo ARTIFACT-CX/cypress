@@ -19,8 +19,7 @@ import (
 // and persistence.
 func newTestDownloadManager(t *testing.T, fake *fakeWorker) *Manager {
 	t.Helper()
-	t.Setenv("CYPRESS_DATA_DIR", t.TempDir())
-	mf, err := NewManifest()
+	mf, err := NewManifest(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

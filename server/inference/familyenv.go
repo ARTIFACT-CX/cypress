@@ -35,13 +35,14 @@ import (
 )
 
 // defaultSyncFamily runs `uv sync` in worker/models/<family>/. Used as
-// Manager.syncFamily by NewManager; tests inject a no-op.
-func defaultSyncFamily(ctx context.Context, family string) error {
+// Manager.syncFamily by NewManager; tests inject a no-op. workerDir is
+// the resolved worker scaffold root (composition root passes it in).
+func defaultSyncFamily(ctx context.Context, workerDir, family string) error {
 	uvPath, err := exec.LookPath("uv")
 	if err != nil {
 		return fmt.Errorf("uv not found on PATH (install from https://docs.astral.sh/uv/): %w", err)
 	}
-	famDir := filepath.Join(workerRootDir(), "models", family)
+	famDir := filepath.Join(workerDir, "models", family)
 	if _, err := os.Stat(filepath.Join(famDir, "pyproject.toml")); err != nil {
 		return fmt.Errorf("family %q has no pyproject.toml at %s: %w", family, famDir, err)
 	}
@@ -66,7 +67,7 @@ func (m *Manager) ensureFamilyEnv(ctx context.Context, family string) error {
 	if family == "" {
 		return errors.New("ensureFamilyEnv: family is required")
 	}
-	venvPath := filepath.Join(workerRootDir(), "models", family, ".venv")
+	venvPath := filepath.Join(m.workerDir, "models", family, ".venv")
 
 	// STEP 1: fast path. The venv directory exists — assume it's
 	// usable. If a partial sync left it broken the spawn will fail
@@ -177,7 +178,7 @@ func (m *Manager) maybeRemoveFamilyEnv(family string) {
 		defer famMu.Unlock()
 	}
 
-	venvPath := filepath.Join(workerRootDir(), "models", family, ".venv")
+	venvPath := filepath.Join(m.workerDir, "models", family, ".venv")
 	if _, err := os.Stat(venvPath); err != nil {
 		return // already gone
 	}

@@ -36,7 +36,7 @@ func TestManager_StartStream_RejectsWhenNotServing(t *testing.T) {
 	// REASON: streaming a model that isn't loaded would error deep inside
 	// the worker; surface the precondition cleanly at the Go boundary so
 	// the WS handler can return a sensible HTTP/WS close code.
-	m := NewManager()
+	m := NewManager(Config{WorkerDir: t.TempDir(), DataDir: t.TempDir()})
 	_, err := m.StartStream(context.Background())
 	if err == nil {
 		t.Fatal("StartStream: want error, got nil")

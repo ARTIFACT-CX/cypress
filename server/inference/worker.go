@@ -73,16 +73,19 @@ type worker struct {
 // for the ready handshake and returns a live handle. Any failure before
 // handshake kills the process and surfaces a descriptive error — callers
 // should not use the returned worker if err != nil.
-func spawnWorker(ctx context.Context, family string) (*worker, error) {
+func spawnWorker(ctx context.Context, workerDir, family string) (*worker, error) {
 	if family == "" {
 		return nil, errors.New("spawnWorker: family is required")
 	}
+	if workerDir == "" {
+		return nil, errors.New("spawnWorker: workerDir is required")
+	}
 
-	// STEP 1: resolve worker scaffold dir + the family venv's python.
-	// We point Python directly at the venv interpreter rather than
-	// going through `uv run` so we don't pay uv's resolve overhead on
-	// every spawn (and so we don't need a pyproject in the cwd).
-	absWorkerDir, err := filepath.Abs(workerRootDir())
+	// STEP 1: resolve the family venv's python. We point Python directly
+	// at the venv interpreter rather than going through `uv run` so we
+	// don't pay uv's resolve overhead on every spawn (and so we don't
+	// need a pyproject in the cwd).
+	absWorkerDir, err := filepath.Abs(workerDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve worker dir: %w", err)
 	}

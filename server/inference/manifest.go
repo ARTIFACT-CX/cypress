@@ -6,10 +6,11 @@
 // records intent: "the user installed this model on this date with
 // these files at this revision."
 //
-// File location: ~/.cypress/models.json (override CYPRESS_DATA_DIR).
-// Schema-versioned so future field additions don't silently corrupt
-// old installs — an unrecognized version reads as empty and we start
-// fresh, which is the safest fallback for a v0.1 cache file.
+// File location: provided by the caller (composition root passes
+// ~/.cypress in prod, a tmpdir in tests). Schema-versioned so future
+// field additions don't silently corrupt old installs — an unrecognized
+// version reads as empty and we start fresh, which is the safest
+// fallback for a v0.1 cache file.
 //
 // SAFETY: every write goes through atomic rename (write tmp, rename
 // over). A crash mid-save loses the in-flight change, never the file.
@@ -55,19 +56,20 @@ type Manifest struct {
 	entries map[string]*ManifestEntry
 }
 
-// NewManifest opens (or creates) the manifest at the resolved data
-// dir path. A missing file is treated as "no installs yet" — not an
-// error — so a fresh user lands in a clean state without a setup step.
-func NewManifest() (*Manifest, error) {
-	dir, err := dataDir()
-	if err != nil {
-		return nil, err
+// NewManifest opens (or creates) the manifest at <dataDir>/models.json.
+// Caller (composition root) decides the path — prod passes ~/.cypress,
+// tests pass a tmpdir. A missing file is treated as "no installs yet"
+// — not an error — so a fresh user lands in a clean state without a
+// setup step.
+func NewManifest(dataDir string) (*Manifest, error) {
+	if dataDir == "" {
+		return nil, errors.New("NewManifest: dataDir is required")
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, err
 	}
 	m := &Manifest{
-		path:    filepath.Join(dir, "models.json"),
+		path:    filepath.Join(dataDir, "models.json"),
 		entries: map[string]*ManifestEntry{},
 	}
 	if err := m.load(); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -189,17 +191,3 @@ func (m *Manifest) All() map[string]ManifestEntry {
 	return out
 }
 
-// dataDir resolves the on-disk root for Cypress's metadata. We don't
-// nest under HF's cache dir because that's HF-managed — our manifest
-// is ours and we shouldn't rely on a third-party tool not deciding to
-// scrub directories it doesn't recognize.
-func dataDir() (string, error) {
-	if v := os.Getenv("CYPRESS_DATA_DIR"); v != "" {
-		return v, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".cypress"), nil
-}

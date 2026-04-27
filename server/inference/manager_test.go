@@ -98,7 +98,7 @@ func newTestManager(fake *fakeWorker) *Manager {
 }
 
 func TestManager_NewManager_StartsIdle(t *testing.T) {
-	m := NewManager()
+	m := NewManager(Config{WorkerDir: t.TempDir(), DataDir: t.TempDir()})
 	if got := m.Status().State; got != StateIdle {
 		t.Fatalf("state = %q, want %q", got, StateIdle)
 	}

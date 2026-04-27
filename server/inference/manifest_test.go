@@ -13,8 +13,7 @@ import (
 
 func newTestManifest(t *testing.T) *Manifest {
 	t.Helper()
-	t.Setenv("CYPRESS_DATA_DIR", t.TempDir())
-	m, err := NewManifest()
+	m, err := NewManifest(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,9 +62,8 @@ func TestManifest_PutGetHasAll(t *testing.T) {
 
 func TestManifest_PersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("CYPRESS_DATA_DIR", dir)
 
-	m1, err := NewManifest()
+	m1, err := NewManifest(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +71,7 @@ func TestManifest_PersistsAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m2, err := NewManifest()
+	m2, err := NewManifest(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,11 +101,10 @@ func TestManifest_DeleteIsIdempotent(t *testing.T) {
 
 func TestManifest_CorruptFileFallsBackToEmpty(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("CYPRESS_DATA_DIR", dir)
 	if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte("not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewManifest()
+	m, err := NewManifest(dir)
 	if err != nil {
 		t.Fatalf("corrupt file should not error: %v", err)
 	}
@@ -118,7 +115,6 @@ func TestManifest_CorruptFileFallsBackToEmpty(t *testing.T) {
 
 func TestManifest_UnknownVersionDiscarded(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("CYPRESS_DATA_DIR", dir)
 	body, _ := json.Marshal(map[string]any{
 		"version": 999,
 		"entries": map[string]any{
@@ -128,7 +124,7 @@ func TestManifest_UnknownVersionDiscarded(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "models.json"), body, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewManifest()
+	m, err := NewManifest(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
