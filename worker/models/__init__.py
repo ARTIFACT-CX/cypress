@@ -13,6 +13,7 @@ from .base import Model, REGISTRY, register
 # any per-family backend autoselect (e.g. moshi/__init__.py picks MLX vs
 # torch on the current host).
 from . import moshi  # noqa: F401
+from . import personaplex  # noqa: F401
 
 
 __all__ = ["Model", "REGISTRY", "register"]

@@ -1,0 +1,52 @@
+# AREA: worker · MODELS · PERSONAPLEX · CONFIG
+# Per-family Python project for NVIDIA PersonaPlex 7B. Has its own
+# .venv; the Go server runs the worker via this venv's python
+# interpreter when the user selects any model in the personaplex
+# family. Shared worker scaffold under worker/ is imported via
+# cwd-on-sys.path — same pattern as the moshi family.
+#
+# Why a separate project from moshi: NVIDIA forks kyutai's `moshi`
+# package, keeping the same import name. Both packages cannot coexist
+# in one venv — sys.modules would collide at import time. Splitting
+# per family is the only sound fix; that's the whole reason #22 exists.
+#
+# Status: loader is not yet implemented (#3). The catalog entry is
+# Available:false until the M1-Pro inference path (likely INT4/MLX) is
+# verified. This pyproject lives here so `uv sync` proves the
+# multi-venv infra works for two families and the venv is ready when
+# the loader lands.
+
+[project]
+name = "cypress-worker-personaplex"
+version = "0.1.0"
+description = "PersonaPlex family model deps for Cypress worker"
+requires-python = ">=3.11"
+dependencies = [
+    # NVIDIA's fork lives in github.com/NVIDIA/personaplex under the
+    # moshi/ subdirectory. We pull it via git so users don't need a
+    # local clone; uv resolves and builds the wheel during `uv sync`.
+    # REASON: NVIDIA hasn't published this to PyPI; a git+subdirectory
+    # spec is the only documented install path (`pip install moshi/.`
+    # from a clone is the README's instruction).
+    "moshi @ git+https://github.com/NVIDIA/personaplex.git#subdirectory=moshi",
+    # hf_hub_download used directly for weight resolution / cache dirs,
+    # mirroring the moshi family.
+    "huggingface_hub>=0.24",
+]
+
+# Dev deps mirror moshi's layout so pytest behaves identically when
+# invoked from this venv. Run with:
+#   uv run --group dev pytest
+# from worker/models/personaplex/.
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: end-to-end tests that exercise real subprocesses, sockets, or model loaders",
+]
+addopts = "-m 'not integration'"
+asyncio_mode = "auto"

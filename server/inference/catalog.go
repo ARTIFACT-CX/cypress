@@ -136,15 +136,23 @@ func catalog() []catalogEntry {
 	return []catalogEntry{
 		defaultMoshiEntry(),
 		{
-			Name:         "personaplex",
-			Label:        "PersonaPlex",
-			Hint:         "7B · duplex + persona",
-			Backend:      "torch",
-			Repo:         "", // not yet published
-			SizeGB:       "~14 GB",
-			Requirements: "~16 GB VRAM · NVIDIA",
-			Available:    false,
-			Family:       "personaplex",
+			Name:    "personaplex",
+			Label:   "PersonaPlex",
+			Hint:    "7B · duplex + persona",
+			Backend: "torch",
+			Repo:    "nvidia/personaplex-7b-v1",
+			// REASON: PersonaPlex reuses moshi's mimi codec + SPM tokenizer
+			// filenames verbatim (NVIDIA forked the runtime), so we share
+			// the constants. The LM weight is a single bf16 safetensors at
+			// ~16.7 GB.
+			Files:        []string{"model.safetensors", moshiMimiFile, moshiTokenizerFile},
+			SizeGB:       "~17 GB",
+			Requirements: "~20 GB VRAM · NVIDIA Ampere/Hopper",
+			// Available stays false until #3 ships an inference path that
+			// works on the platforms we target (M1 Pro 16 GB needs INT4
+			// quant; the bf16 checkpoint is too large for unified memory).
+			Available: false,
+			Family:    "personaplex",
 		},
 	}
 }
