@@ -46,11 +46,24 @@ func (m *Manager) DownloadModel(name string) error {
 		return fmt.Errorf("model %q has no download metadata", name)
 	}
 
+	if entry.Family == "" {
+		return fmt.Errorf("model %q has no family configured", name)
+	}
+
 	// STEP 1: reserve the inflight slot and seed initial progress so a
 	// /models call right after this returns shows the download as
 	// active. Doing this before the IPC means the UI's progress bar
 	// appears immediately, not after the worker emits its first event.
 	m.mu.Lock()
+	// REASON: same single-family worker constraint as LoadModel — refuse
+	// a download that would target a different family's venv than the
+	// running worker. The user can unload first; .incomplete blobs the
+	// previous family wrote stay on disk so they can resume later.
+	if m.worker != nil && m.workerFamily != "" && m.workerFamily != entry.Family {
+		m.mu.Unlock()
+		return fmt.Errorf("worker is running %q models; unload before downloading %q (family %q)",
+			m.workerFamily, name, entry.Family)
+	}
 	if _, exists := m.inflightDownloads[name]; exists {
 		m.mu.Unlock()
 		return errors.New("download already in progress")
@@ -92,7 +105,7 @@ func (m *Manager) runDownload(ctx context.Context, name string, entry *catalogEn
 	w := m.worker
 	m.mu.Unlock()
 	if w == nil {
-		spawned, err := m.spawn(ctx, workerDir())
+		spawned, err := m.spawn(ctx, entry.Family)
 		if err != nil {
 			return fmt.Errorf("worker spawn failed: %w", err)
 		}
@@ -102,6 +115,7 @@ func (m *Manager) runDownload(ctx context.Context, name string, entry *catalogEn
 		// parallel. Keep the first one; release ours.
 		if m.worker == nil {
 			m.worker = spawned
+			m.workerFamily = entry.Family
 			w = spawned
 			if m.state == StateIdle {
 				m.state = StateReady

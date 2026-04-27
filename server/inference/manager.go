@@ -14,6 +14,7 @@ package inference
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -58,8 +59,10 @@ type workerHandle interface {
 }
 
 // spawnFn is the constructor for a workerHandle. NewManager defaults this
-// to the real spawnWorker; tests inject a fake.
-type spawnFn func(ctx context.Context, dir string) (workerHandle, error)
+// to the real spawnWorker; tests inject a fake. The family argument
+// selects which per-family Python venv (worker/models/<family>/.venv)
+// the subprocess is launched from.
+type spawnFn func(ctx context.Context, family string) (workerHandle, error)
 
 // Manager is the Go-side handle to the Python inference worker.
 type Manager struct {
@@ -70,9 +73,15 @@ type Manager struct {
 	mu     sync.Mutex
 	state  State
 	worker workerHandle
-	model  string
-	device string // populated on successful load; "mps" / "cuda" / "cpu"
-	phase  string // current loader phase ("downloading_mimi", etc.), cleared on ready
+	// workerFamily is the model family the running worker subprocess was
+	// spawned for (matches catalogEntry.Family). Empty when no worker is
+	// up. Used to refuse load/download requests that would require
+	// swapping the Python venv mid-session — the host shuts the worker
+	// down first instead.
+	workerFamily string
+	model        string
+	device       string // populated on successful load; "mps" / "cuda" / "cpu"
+	phase        string // current loader phase ("downloading_mimi", etc.), cleared on ready
 	// lastError stores the most recent load failure so the UI can surface it
 	// even when it polled in after the failing HTTP request already returned.
 	// Cleared when a new load starts so stale errors don't linger.
@@ -146,8 +155,8 @@ func newManagerWithSpawn(spawn spawnFn) *Manager {
 
 // defaultSpawn adapts the package's real spawnWorker (which returns the
 // concrete *worker) into the workerHandle interface Manager depends on.
-func defaultSpawn(ctx context.Context, dir string) (workerHandle, error) {
-	return spawnWorker(ctx, dir)
+func defaultSpawn(ctx context.Context, family string) (workerHandle, error) {
+	return spawnWorker(ctx, family)
 }
 
 // LoadModel kicks off a model load. Returns synchronously as soon as the
@@ -164,6 +173,17 @@ func defaultSpawn(ctx context.Context, dir string) (workerHandle, error) {
 // handshake, or the worker-side loader land in m.lastError and surface
 // via /status.
 func (m *Manager) LoadModel(name string) error {
+	// STEP 0: pre-flight the catalog so we know which family to spawn
+	// (and which venv that selects). Unknown / unavailable models fail
+	// here rather than after we've spawned a worker for nothing.
+	entry := catalogEntryByName(name)
+	if entry == nil {
+		return fmt.Errorf("unknown model %q", name)
+	}
+	if entry.Family == "" {
+		return fmt.Errorf("model %q has no family configured", name)
+	}
+
 	// STEP 1: synchronously advance state under the lock so a /status
 	// call observed any time after this returns sees "starting" or
 	// "loading", never a stale "idle"/"serving".
@@ -171,6 +191,16 @@ func (m *Manager) LoadModel(name string) error {
 	if m.state == StateStarting || m.state == StateLoading {
 		m.mu.Unlock()
 		return errors.New("busy: another load in progress")
+	}
+	// REASON: the worker subprocess imports a single family's Python
+	// stack; PersonaPlex's forked `moshi` and kyutai's `moshi` cannot
+	// coexist in one process. Refuse cross-family loads while a worker
+	// is up and force the user to unload first — Shutdown drops the
+	// subprocess so the next load spawns the right venv.
+	if m.worker != nil && m.workerFamily != "" && m.workerFamily != entry.Family {
+		m.mu.Unlock()
+		return fmt.Errorf("worker is running %q models; unload before loading %q (family %q)",
+			m.workerFamily, name, entry.Family)
 	}
 	// Clear any stale error from a previous failed attempt so the UI
 	// doesn't continue to show it once the user retries.
@@ -188,7 +218,7 @@ func (m *Manager) LoadModel(name string) error {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), loadTimeout)
 		defer cancel()
-		m.doLoad(ctx, name)
+		m.doLoad(ctx, name, entry.Family)
 	}()
 	return nil
 }
@@ -197,7 +227,7 @@ func (m *Manager) LoadModel(name string) error {
 // owned by the manager; never call directly. All exit paths must leave
 // the manager in a sensible terminal state (Idle / Ready / Serving) so
 // the UI's /status poll converges.
-func (m *Manager) doLoad(ctx context.Context, name string) {
+func (m *Manager) doLoad(ctx context.Context, name string, family string) {
 	// STEP A: spawn the worker if we don't have one. uv cold start can
 	// take several seconds on first run; we hold no lock during it so
 	// /status keeps responding.
@@ -206,7 +236,7 @@ func (m *Manager) doLoad(ctx context.Context, name string) {
 	m.mu.Unlock()
 
 	if needSpawn {
-		w, err := m.spawn(ctx, workerDir())
+		w, err := m.spawn(ctx, family)
 		m.mu.Lock()
 		if err != nil {
 			m.state = StateIdle
@@ -217,6 +247,7 @@ func (m *Manager) doLoad(ctx context.Context, name string) {
 		}
 		w.setOnEvent(m.handleEvent)
 		m.worker = w
+		m.workerFamily = family
 		m.state = StateLoading
 		m.mu.Unlock()
 	}
@@ -303,6 +334,7 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	m.mu.Lock()
 	w := m.worker
 	m.worker = nil
+	m.workerFamily = ""
 	m.model = ""
 	m.device = ""
 	m.phase = ""
@@ -314,10 +346,11 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	}
 }
 
-// workerDir resolves the worker/ directory. In dev the server runs with
-// cwd = server/, so the worker is a sibling. CYPRESS_WORKER_DIR overrides
-// this for tests and packaged builds where the layout differs.
-func workerDir() string {
+// workerRootDir resolves the worker/ directory. In dev the server runs
+// with cwd = server/, so the worker is a sibling. CYPRESS_WORKER_DIR
+// overrides this for tests and packaged builds where the layout differs.
+// Per-family venvs live under <root>/models/<family>/.venv.
+func workerRootDir() string {
 	if env := os.Getenv("CYPRESS_WORKER_DIR"); env != "" {
 		return env
 	}

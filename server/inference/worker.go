@@ -67,33 +67,40 @@ type worker struct {
 	done chan struct{}
 }
 
-// spawnWorker launches `uv run python main.py` in workerDir, waits for the
-// ready handshake, and returns a live handle ready to accept commands. Any
-// failure before handshake kills the process and surfaces a descriptive
-// error — callers should not use the returned worker if err != nil.
-func spawnWorker(ctx context.Context, workerDir string) (*worker, error) {
-	// STEP 1: resolve `uv` on PATH up front. LookPath gives us a clean
-	// "exec: \"uv\": executable file not found" that the UI can display as
-	// "uv is not installed" rather than a vague spawn failure.
-	uvPath, err := exec.LookPath("uv")
-	if err != nil {
-		return nil, fmt.Errorf("uv not found on PATH (install from https://docs.astral.sh/uv/): %w", err)
+// spawnWorker launches the worker with the per-family Python venv at
+// worker/models/<family>/.venv (cwd stays at worker/ so `import audio`,
+// `import ipc`, `import models` resolve to the shared scaffold). Waits
+// for the ready handshake and returns a live handle. Any failure before
+// handshake kills the process and surfaces a descriptive error — callers
+// should not use the returned worker if err != nil.
+func spawnWorker(ctx context.Context, family string) (*worker, error) {
+	if family == "" {
+		return nil, errors.New("spawnWorker: family is required")
 	}
 
-	absDir, err := filepath.Abs(workerDir)
+	// STEP 1: resolve worker scaffold dir + the family venv's python.
+	// We point Python directly at the venv interpreter rather than
+	// going through `uv run` so we don't pay uv's resolve overhead on
+	// every spawn (and so we don't need a pyproject in the cwd).
+	absWorkerDir, err := filepath.Abs(workerRootDir())
 	if err != nil {
 		return nil, fmt.Errorf("resolve worker dir: %w", err)
 	}
-	if _, err := os.Stat(absDir); err != nil {
-		return nil, fmt.Errorf("worker dir %q: %w", absDir, err)
+	if _, err := os.Stat(absWorkerDir); err != nil {
+		return nil, fmt.Errorf("worker dir %q: %w", absWorkerDir, err)
+	}
+	pythonPath := filepath.Join(absWorkerDir, "models", family, ".venv", "bin", "python")
+	if _, err := os.Stat(pythonPath); err != nil {
+		return nil, fmt.Errorf("family venv missing for %q (run `uv sync` in worker/models/%s): %w",
+			family, family, err)
 	}
 
 	// STEP 2: build the command. Stderr is forwarded to our stderr so
 	// Python tracebacks land in the server log unmodified — the host sees
 	// exactly what the worker printed, which is invaluable when debugging
 	// import or device errors.
-	cmd := exec.Command(uvPath, "run", "python", "main.py")
-	cmd.Dir = absDir
+	cmd := exec.Command(pythonPath, "main.py")
+	cmd.Dir = absWorkerDir
 	cmd.Env = os.Environ()
 	cmd.Stderr = os.Stderr
 

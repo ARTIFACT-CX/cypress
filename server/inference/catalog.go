@@ -74,6 +74,13 @@ type catalogEntry struct {
 	SizeGB       string
 	Requirements string
 	Available    bool
+	// Family selects which per-family Python venv the worker is spawned
+	// from (worker/models/<family>/.venv). Two model names that share a
+	// family (e.g. `moshi` / `moshi-mlx` / `moshi-torch`) reuse the same
+	// subprocess; switching to a different family requires a worker
+	// restart so we don't try to import two conflicting Python stacks at
+	// once (PersonaPlex's forked `moshi` package vs kyutai's).
+	Family string
 }
 
 // REASON: backend selection mirrors worker/models/__init__.py's
@@ -104,6 +111,7 @@ func defaultMoshiEntry() catalogEntry {
 			SizeGB:       "~4 GB",
 			Requirements: "~6 GB unified memory · Apple Silicon",
 			Available:    true,
+			Family:       "moshi",
 		}
 	}
 	return catalogEntry{
@@ -116,6 +124,7 @@ func defaultMoshiEntry() catalogEntry {
 		SizeGB:       "~14 GB",
 		Requirements: "~14 GB VRAM · CUDA preferred",
 		Available:    true,
+		Family:       "moshi",
 	}
 }
 
@@ -135,6 +144,7 @@ func catalog() []catalogEntry {
 			SizeGB:       "~14 GB",
 			Requirements: "~16 GB VRAM · NVIDIA",
 			Available:    false,
+			Family:       "personaplex",
 		},
 	}
 }

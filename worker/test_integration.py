@@ -33,11 +33,14 @@ async def _read_json_line(stream: asyncio.StreamReader) -> dict:
 
 @pytest.mark.integration
 async def test_handshake_and_status_round_trip():
-    # STEP 1: launch the worker the same way the Go server does — through
-    # `uv run python main.py` so we exercise the real entrypoint, not a
-    # short-circuited Python import.
+    # STEP 1: launch the worker the same way the Go server does — point
+    # Python at the per-family venv (moshi here) with cwd=worker/ so the
+    # shared scaffold (audio/, ipc/, models/) imports cleanly.
+    family_python = WORKER_DIR / "models" / "moshi" / ".venv" / "bin" / "python"
+    if not family_python.exists():
+        pytest.skip(f"moshi family venv missing at {family_python} — run `uv sync` there")
     proc = await asyncio.create_subprocess_exec(
-        "uv", "run", "python", "main.py",
+        str(family_python), "main.py",
         cwd=str(WORKER_DIR),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,

@@ -190,7 +190,10 @@ func TestManager_LoadModel_LoaderFailure_StaysReady(t *testing.T) {
 	}
 	m := newTestManager(fake)
 
-	if err := m.LoadModel("does-not-exist"); err != nil {
+	// Use a real catalog name; the fakeWorker simulates the loader
+	// rejecting it. Pre-flight catalog check would short-circuit on
+	// an unknown name before we got to the worker call.
+	if err := m.LoadModel("moshi"); err != nil {
 		t.Fatalf("LoadModel: %v", err)
 	}
 

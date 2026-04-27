@@ -1,0 +1,49 @@
+# AREA: worker · MODELS · MOSHI · CONFIG
+# Per-family Python project for Kyutai Moshi (torch + mlx backends).
+# Has its own .venv; the Go server runs the worker via this venv's
+# python interpreter when the user selects any model in the moshi family
+# (`moshi`, `moshi-torch`, `moshi-mlx`). The shared worker code under
+# worker/ is imported via cwd-on-sys.path — see server/inference/worker.go.
+#
+# Why a separate project at all: PersonaPlex ships a forked `moshi`
+# package under the same import name as kyutai's, so the two cannot live
+# in one venv. Splitting per family lets us evolve them independently
+# and avoids a sys.modules collision at import time.
+
+[project]
+name = "cypress-worker-moshi"
+version = "0.1.0"
+description = "Moshi family model deps for Cypress worker"
+requires-python = ">=3.11"
+dependencies = [
+    # moshi ships its own torch pin; we let it drive the torch version so
+    # checkpoint format and op coverage stay aligned with what kyutai tests.
+    "moshi>=0.2.0",
+    # hf_hub_download used directly for weight resolution / cache dirs.
+    "huggingface_hub>=0.24",
+    # mlx backend is Apple-Silicon only; the wheel doesn't publish for
+    # non-darwin and a plain `uv sync` on Linux would fail without this
+    # platform marker. moshi-torch users on Linux/CUDA simply skip it.
+    "moshi-mlx>=0.2.0; sys_platform == 'darwin'",
+]
+
+# REASON: dev deps live here too because the moshi family's unit tests
+# (test_torch.py / test_mlx.py / test_stream.py) import torch / mlx,
+# which only exist in this venv. Run with:
+#   uv run --group dev pytest
+# from worker/models/moshi/.
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+# Mirror the root worker config so the suite behaves identically when
+# invoked from this venv: integration gated, async-by-default, same
+# rootdir-style discovery (pytest scans the current dir).
+markers = [
+    "integration: end-to-end tests that exercise real subprocesses, sockets, or model loaders",
+]
+addopts = "-m 'not integration'"
+asyncio_mode = "auto"

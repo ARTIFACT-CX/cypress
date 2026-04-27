@@ -49,11 +49,14 @@ func findWorkerDir(t *testing.T) string {
 // handshake, one round-trip, and clean shutdown all work.
 func TestIntegration_Spawn_HandshakeAndStatus(t *testing.T) {
 	dir := findWorkerDir(t)
+	// spawnWorker resolves the venv via workerRootDir(); steer it at the
+	// test's worker tree so we don't depend on the dev server cwd.
+	t.Setenv("CYPRESS_WORKER_DIR", dir)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	w, err := spawnWorker(ctx, dir)
+	w, err := spawnWorker(ctx, "moshi")
 	if err != nil {
 		t.Fatalf("spawnWorker: %v", err)
 	}

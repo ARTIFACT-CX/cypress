@@ -1,21 +1,22 @@
 # AREA: worker · CONFIG
-# Worker Python project metadata. Dependencies stay empty in the scaffold;
-# model packages (torch, moshi, etc.) get added when each model lands.
-# uv reads this file to resolve and lock dependencies into uv.lock.
+# Shared worker project. Holds the composition root (main.py) and shared
+# features (audio, ipc, base models) plus dev deps for the unit suite. It
+# does NOT pull in any model libraries — those live in per-family projects
+# under worker/models/<family>/, each with its own .venv. The Go server
+# spawns the worker through the family-specific venv's Python interpreter
+# (see server/inference/worker.go), so the chosen model's Python stack is
+# the only one ever imported. This keeps PersonaPlex's forked `moshi`
+# package from colliding with kyutai's at install time.
 
 [project]
 name = "cypress-worker"
 version = "0.1.0"
-description = "Python inference worker for Cypress"
+description = "Shared worker scaffold for Cypress (no model deps)"
 requires-python = ">=3.11"
-dependencies = [
-    # moshi ships its own torch pin; we let it drive the torch version so
-    # checkpoint format and op coverage stay aligned with what kyutai tests.
-    "moshi>=0.2.0",
-    # hf_hub_download is used directly for weight resolution / cache dirs.
-    "huggingface_hub>=0.24",
-    "moshi-mlx>=0.2.0",
-]
+# REASON: empty by design. Model deps belong in the per-family pyproject
+# (e.g. worker/models/moshi/pyproject.toml). The unit suite fakes
+# huggingface_hub via sys.modules monkeypatch, so we don't need it here.
+dependencies = []
 
 # REASON: dev-only deps (test runner, async test helper) live in a uv
 # dependency group so packaged builds don't ship pytest. Activate locally
@@ -35,7 +36,10 @@ markers = [
 ]
 # Default invocation deselects integration; override with `-m integration`
 # (the explicit -m on the cmdline replaces this addopts value, so the
-# integration suite still runs when asked for).
-addopts = "-m 'not integration'"
+# integration suite still runs when asked for). Also ignore family-
+# specific test trees — those import model libs (torch, mlx, …) that
+# don't live in this venv. Each family's tests run from its own venv,
+# e.g. `worker/models/moshi/.venv/bin/pytest worker/models/moshi/`.
+addopts = "-m 'not integration' --ignore=models/moshi"
 # pytest-asyncio: allow `async def test_...` without a per-test decorator.
 asyncio_mode = "auto"
