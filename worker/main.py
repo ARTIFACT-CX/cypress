@@ -2,27 +2,35 @@
 AREA: worker · ENTRY · COMPOSITION-ROOT
 
 Cypress Python inference worker. Launched as a subprocess by the Go
-orchestration server. Speaks two channels:
+orchestration server (local) or run standalone on a remote box.
 
-  - stdin / stdout : JSON-line control protocol (see ipc/commands.py)
-  - unix socket    : binary audio frames, path announced in handshake
+Speaks one channel: a gRPC bidi RPC (`Worker.Session`) over either a
+unix domain socket (local subprocess, file perms = auth) or TCP
+(remote worker, TLS + auth wired in a follow-up). The same dispatcher
+serves both — only the listener changes.
 
 This file is the composition root: it imports each feature, wires them
-together, and starts the run loop. Cross-feature wiring (models →
-ipc.run_loop) lives only here so the dependency graph between features
-stays grep-able to one place.
-
-On startup it opens the audio socket, prints a ready handshake on stdout,
-and then runs the control loop until the host closes stdin or sends
-`{"cmd":"shutdown"}`. Any uncaught error is reported on stdout as
-`{"fatal": "..."}` so the host can surface it rather than silently exiting.
+together, starts the gRPC server, and waits for a shutdown command.
+Cross-feature wiring (models → ipc) lives only here so the dependency
+graph between features stays grep-able to one place.
 """
 
+import argparse
 import asyncio
-import json
 import os
+import pathlib
 import sys
 import traceback
+
+# REASON: the proto-generated `workerpb` package lives at the repo root
+# (proto/dist/python/workerpb), shared by both Go and Python sides. Each
+# per-family venv runs `python -m worker.main` from this file's parent,
+# so we add the generated dir to sys.path here in the composition root.
+# Doing it via sys.path (rather than installing as an editable package
+# in every per-family pyproject) keeps the worker venvs lean.
+_PROTO_PY = pathlib.Path(__file__).resolve().parent.parent / "proto" / "dist" / "python"
+if _PROTO_PY.is_dir():
+    sys.path.insert(0, str(_PROTO_PY))
 
 # REASON: drop scheduling priority before any heavy work so the loader and
 # (later) the streaming generation don't starve the rest of the system.
@@ -60,7 +68,6 @@ if _mps_high:
     os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.0")
     os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", _mps_high)
 
-import audio
 import ipc
 
 # REASON: importing `models` triggers each concrete model's @register
@@ -70,58 +77,61 @@ import ipc
 import models
 
 
-# SETUP: the unix socket path is derived from our pid so multiple workers
-# can coexist during dev (e.g. one orphaned from a prior crash plus a new
-# one the user just launched). The host reads this path from the handshake.
-SOCKET_DIR = "/tmp"
+def _default_listen() -> str:
+    # SETUP: derive a per-pid unix socket path so multiple workers can
+    # coexist during dev (e.g. one orphaned from a prior crash plus a
+    # new one the user just launched). The Go host's spawnWorker mints
+    # this same path before exec so it knows where to dial.
+    return f"unix:/tmp/cypress-{os.getpid()}.sock"
 
 
-def _socket_path() -> str:
-    return os.path.join(SOCKET_DIR, f"cypress-{os.getpid()}.sock")
-
-
-def _write(msg: dict) -> None:
-    # REASON: stdout is line-buffered by default when attached to a pipe in
-    # Python 3.11+, but flush explicitly so the host sees each reply
-    # immediately. Any delay here shows up as apparent hangs on the Go side.
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
-
-
-async def _run() -> None:
-    # STEP 1: open the audio socket. Must be ready before we send the
-    # handshake because the host may connect as soon as it reads the path.
-    sock_path = _socket_path()
-    audio_server = await audio.start_server(sock_path)
-
-    # STEP 2: announce ready. Once this line is on stdout the host knows
-    # where to connect for audio and can start sending control commands.
-    _write({"ready": True, "audio_socket": sock_path})
-
-    # STEP 3: run the control loop. Returns when stdin EOFs or a shutdown
-    # command is received. We pass the model registry as an explicit
-    # dependency so ipc never imports from the models feature.
-    try:
-        await ipc.run_loop(_write, models.REGISTRY)
-    finally:
-        # STEP 4: clean up the audio socket even on error paths so we don't
-        # leave stale sockets in /tmp for the next run.
-        audio_server.close()
-        await audio_server.wait_closed()
+async def _run(listen: str) -> None:
+    # Cleanup the unix socket on exit so we don't leave stale files in
+    # /tmp for the next run. TCP listeners self-clean.
+    sock_path: str | None = None
+    if listen.startswith("unix:"):
+        sock_path = listen[len("unix:") :]
+        # Stale socket from a prior crashed run blocks bind; clear it.
         try:
             os.unlink(sock_path)
         except FileNotFoundError:
             pass
 
+    try:
+        await ipc.serve(listen, models.REGISTRY)
+    finally:
+        if sock_path is not None:
+            try:
+                os.unlink(sock_path)
+            except FileNotFoundError:
+                pass
+
 
 def main() -> None:
+    parser = argparse.ArgumentParser(prog="cypress-worker")
+    parser.add_argument(
+        "--listen",
+        default=None,
+        help=(
+            "gRPC listen target. Forms: 'unix:<path>' (local subprocess, "
+            "default) or 'tcp://host:port' (remote worker)."
+        ),
+    )
+    args = parser.parse_args()
+    listen = args.listen or _default_listen()
+
     try:
-        asyncio.run(_run())
+        asyncio.run(_run(listen))
+    except KeyboardInterrupt:
+        # Ctrl-C from a manual run is not an error; exit cleanly.
+        pass
     except Exception:
-        # REASON: surface fatal startup errors through the same stdout channel
-        # the host is already reading. If we just raised, the host would see
-        # an unexplained non-zero exit.
-        _write({"fatal": traceback.format_exc()})
+        # REASON: surface fatal startup errors on stderr so the host's
+        # forwarded stderr shows them. The handshake path can no longer
+        # carry a fatal message once we've failed to even bind the
+        # gRPC listener — exit non-zero and let the host report the
+        # spawn failure.
+        sys.stderr.write(traceback.format_exc())
         sys.exit(1)
 
 

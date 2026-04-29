@@ -1,19 +1,17 @@
 """
 AREA: worker · IPC · COMMANDS
 
-Reads JSON-line commands from stdin and writes JSON-line replies via the
-`write` callback supplied by main.py. One command = one reply, always.
+Async dispatch table for worker control commands. Pure logic — no I/O.
+The gRPC servicer in server.py owns the wire format and feeds parsed
+command dicts in here, then converts the returned reply dict back into
+a typed proto message on the way out.
 
-Command shape:
-    {"id": <opaque>, "cmd": "<name>", ...params}
+Command shape (caller's responsibility to construct):
+    {"cmd": "<name>", ...params}
 
-Reply shape:
-    {"id": <same>, "ok": true, ...result}
-    {"id": <same>, "error": "<message>"}
-
-The `id` field is optional but the host typically sets it to correlate
-async requests. We echo it back verbatim so the host can match replies to
-outstanding requests.
+Reply shape (handler's contract):
+    {"ok": true, ...result}
+    {"error": "<message>"}
 
 Cross-feature boundary: this module never imports from `models` or any
 other feature directly. Instead it accepts a `ModelRegistry` at startup
@@ -26,10 +24,7 @@ modules (model commands, audio commands, tool commands) and compose them.
 """
 
 import asyncio
-import base64
-import json
 import os
-import sys
 from typing import Any, Awaitable, Callable
 
 from .ports import ModelRegistry
@@ -51,10 +46,10 @@ _state: dict[str, Any] = {
     "download": None,
 }
 
-# SETUP: dependencies wired in by run_loop. Stashing them as module
-# globals (rather than threading them through every handler signature)
-# matches the singleton nature of the worker — there is exactly one
-# control loop per process, so per-call injection would be ceremony.
+# SETUP: dependencies wired in by the I/O shell (gRPC servicer). Stashing
+# them as module globals (rather than threading them through every handler
+# signature) matches the singleton nature of the worker — there is exactly
+# one session per process at a time, so per-call injection would be ceremony.
 _write_fn: "WriteFn | None" = None
 _registry: ModelRegistry | None = None
 
@@ -64,14 +59,22 @@ WriteFn = Callable[[dict], None]
 
 
 def emit_event(msg: dict) -> None:
-    # Events are worker→host one-way messages with no id. The host
-    # readLoop routes them into a Manager event handler rather than any
+    # Events are worker→host one-way messages with no id. The host's
+    # gRPC stream demuxes them off ServerMsg.event rather than any
     # waiter channel. Keeping them out-of-band means they never collide
-    # with pending request/reply pairs. Public so other features (audio,
-    # eventually session) can push events without depending on commands'
-    # internals.
+    # with pending request/reply pairs. Public so other features can
+    # push events without depending on commands' internals.
     if _write_fn is not None:
         _write_fn(msg)
+
+
+def configure(write: WriteFn, registry: ModelRegistry) -> None:
+    """Wire the handler globals. Called once per gRPC session by the
+    servicer before it starts dispatching commands. Tests may call this
+    directly when they want to inject a capturing write."""
+    global _write_fn, _registry
+    _write_fn = write
+    _registry = registry
 
 
 async def _handle_status(_msg: dict) -> dict:
@@ -90,7 +93,7 @@ async def _handle_load_model(msg: dict) -> dict:
     if not isinstance(name, str) or not name:
         return {"error": "missing or invalid 'name'"}
 
-    assert _registry is not None, "registry not wired; call run_loop first"
+    assert _registry is not None, "registry not wired; call configure first"
     cls = _registry.get(name)
     if cls is None:
         known = ", ".join(sorted(_registry.keys())) or "(none registered)"
@@ -144,8 +147,10 @@ async def _handle_unload(_msg: dict) -> dict:
 
 
 async def _handle_shutdown(_msg: dict) -> dict:
-    # The reply is sent before the loop exits (see run_loop below).
-    return {"ok": True, "bye": True}
+    # The reply is sent before the gRPC server tears the stream down
+    # (see server.py). All cleanup happens around the dispatch loop, not
+    # here, so this stays a trivial ack.
+    return {"ok": True}
 
 
 async def _handle_run_wav(msg: dict) -> dict:
@@ -234,16 +239,12 @@ async def _handle_audio_in(msg: dict) -> dict:
     if session is None:
         return {"error": "no active stream; call start_stream first"}
 
-    pcm_b64 = msg.get("pcm")
-    if not isinstance(pcm_b64, str):
-        return {"error": "missing or invalid 'pcm' (expected base64 string)"}
-    try:
-        pcm = base64.b64decode(pcm_b64, validate=True)
-    except (ValueError, base64.binascii.Error) as e:
-        return {"error": f"invalid base64 pcm: {e}"}
+    pcm = msg.get("pcm")
+    if not isinstance(pcm, (bytes, bytearray)):
+        return {"error": "missing or invalid 'pcm' (expected bytes)"}
 
     try:
-        await session.feed(pcm)
+        await session.feed(bytes(pcm))
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
     return {"ok": True}
@@ -494,13 +495,12 @@ async def _drain_stream(session: Any) -> None:
     sentinel (i.e. when stop_stream → session.aclose() runs)."""
     try:
         async for chunk in session:
-            # Base64 keeps audio inline in the JSON IPC for v0.1 (see #20
-            # for the planned sidechannel optimization). text is None on
-            # most frames since inner-monologue tokens are sparse.
+            # PCM rides as native bytes — gRPC's framing already moves
+            # binary efficiently, so the JSON-era base64 tax is gone.
             emit_event(
                 {
                     "event": "audio_out",
-                    "pcm": base64.b64encode(chunk.audio_pcm).decode("ascii"),
+                    "pcm": chunk.audio_pcm,
                     "text": chunk.text,
                 }
             )
@@ -551,6 +551,10 @@ async def _stop_active_stream() -> None:
     _state["stream_drain"] = None
 
 
+# SWAP: the gRPC servicer (server.py) imports this table to dispatch
+# incoming ClientMsg payloads. Keeping it dict-keyed by the same string
+# names the JSON protocol used means the handler signatures stayed
+# stable across the transport swap.
 _HANDLERS: dict[str, Handler] = {
     "status": _handle_status,
     "load_model": _handle_load_model,
@@ -563,72 +567,3 @@ _HANDLERS: dict[str, Handler] = {
     "download_model": _handle_download_model,
     "cancel_download": _handle_cancel_download,
 }
-
-
-async def _stdin_reader() -> asyncio.StreamReader:
-    # REASON: asyncio needs stdin wrapped as a StreamReader before we can
-    # await readline(). Without this wrapper, reading stdin blocks the
-    # entire event loop and nothing else (audio socket, timers) can run.
-    loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
-    return reader
-
-
-async def run_loop(write: WriteFn, registry: ModelRegistry) -> None:
-    # Stash the wired dependencies. run_loop is the single entry point,
-    # so doing it once here covers every downstream caller.
-    global _write_fn, _registry
-    _write_fn = write
-    _registry = registry
-
-    reader = await _stdin_reader()
-
-    while True:
-        # STEP 1: read one newline-delimited command from the host. An
-        # empty read means the host closed stdin — treat as shutdown.
-        line = await reader.readline()
-        if not line:
-            return
-
-        # STEP 2: parse JSON. Malformed input is reported but does not
-        # terminate the loop — the host may send more valid commands next.
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError as e:
-            write({"error": f"invalid json: {e}"})
-            continue
-
-        cmd = msg.get("cmd")
-        msg_id = msg.get("id")
-
-        # STEP 3: dispatch.
-        handler = _HANDLERS.get(cmd)
-        if handler is None:
-            write(_tag_id({"error": f"unknown command: {cmd!r}"}, msg_id))
-            continue
-
-        # STEP 4: run the handler. Catch broadly so a buggy handler never
-        # takes down the worker; the host sees the error and can decide
-        # whether to retry, send a new command, or restart the worker.
-        try:
-            reply = await handler(msg)
-        except Exception as e:
-            reply = {"error": f"handler crashed: {e!r}"}
-
-        write(_tag_id(reply, msg_id))
-
-        # STEP 5: shutdown is special — its reply goes out *before* we
-        # return, so the host gets its ack and can proceed to join the
-        # process cleanly.
-        if cmd == "shutdown":
-            return
-
-
-def _tag_id(reply: dict, msg_id) -> dict:
-    # Echo the caller's correlation id back if they sent one. Keeps the
-    # reply shape deterministic for the host's request/reply matcher.
-    if msg_id is not None:
-        reply = {"id": msg_id, **reply}
-    return reply

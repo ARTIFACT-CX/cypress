@@ -6,9 +6,6 @@ fakes — these run in milliseconds with no torch / HF dependency.
 """
 
 import asyncio
-import base64
-import io
-import json
 from typing import Any, Callable
 
 import pytest
@@ -412,7 +409,7 @@ async def test_start_stream_surfaces_session_start_failure():
 
 
 async def test_audio_in_rejects_when_no_active_stream():
-    reply = await commands._handle_audio_in({"pcm": base64.b64encode(b"\x00\x00").decode()})
+    reply = await commands._handle_audio_in({"pcm": b"\x00\x00"})
     assert "error" in reply
     assert "no active stream" in reply["error"]
 
@@ -429,25 +426,27 @@ async def test_audio_in_rejects_missing_pcm_field():
         await commands._stop_active_stream()
 
 
-async def test_audio_in_rejects_invalid_base64():
+async def test_audio_in_rejects_non_bytes_payload():
+    # gRPC delivers PCM as native bytes; a non-bytes value here means the
+    # wireconv adapter regressed (or a test forgot to send bytes).
     fake = FakeStreamingSessionModel(emit=lambda _m: None)
     commands._state["instance"] = fake
     await commands._handle_start_stream({})
     try:
-        reply = await commands._handle_audio_in({"pcm": "not!!base64!!"})
+        reply = await commands._handle_audio_in({"pcm": "not bytes"})
         assert "error" in reply
-        assert "base64" in reply["error"]
+        assert "bytes" in reply["error"]
     finally:
         await commands._stop_active_stream()
 
 
-async def test_audio_in_decodes_and_feeds_session():
+async def test_audio_in_feeds_session():
     raw = b"\x01\x00\x02\x00\x03\x00"
     fake = FakeStreamingSessionModel(emit=lambda _m: None)
     commands._state["instance"] = fake
     await commands._handle_start_stream({})
     try:
-        reply = await commands._handle_audio_in({"pcm": base64.b64encode(raw).decode()})
+        reply = await commands._handle_audio_in({"pcm": raw})
         assert reply == {"ok": True}
         assert fake.session.fed == [raw]
     finally:
@@ -479,7 +478,7 @@ async def test_stop_stream_closes_active_session():
 # drain task → audio_out events
 
 
-async def test_drain_task_emits_audio_out_events_with_base64():
+async def test_drain_task_emits_audio_out_events_with_raw_bytes():
     captured: list[dict] = []
     commands._write_fn = captured.append
     fake = FakeStreamingSessionModel(emit=lambda _m: None)
@@ -499,7 +498,8 @@ async def test_drain_task_emits_audio_out_events_with_base64():
     assert len(captured) >= 1
     evt = captured[0]
     assert evt["event"] == "audio_out"
-    assert base64.b64decode(evt["pcm"]) == b"\xaa\xbb"
+    # Native bytes — no base64 round-trip on the gRPC wire.
+    assert evt["pcm"] == b"\xaa\xbb"
     assert evt["text"] == "hi"
 
 
@@ -569,125 +569,9 @@ def test_emit_event_calls_write_fn_when_set():
 
 
 def test_emit_event_is_silent_when_unwired():
-    # No exception even when called before run_loop has wired _write_fn.
+    # No exception even when called before configure() has wired _write_fn.
     commands._write_fn = None
     commands.emit_event({"event": "ignored"})
-
-
-# --- _tag_id ----------------------------------------------------------------
-
-
-def test_tag_id_echoes_when_present():
-    out = commands._tag_id({"ok": True}, 42)
-    assert out == {"id": 42, "ok": True}
-
-
-def test_tag_id_omits_when_none():
-    out = commands._tag_id({"ok": True}, None)
-    assert "id" not in out
-
-
-# --- run_loop dispatch -------------------------------------------------------
-
-
-class _StubReader:
-    """asyncio.StreamReader-shaped just enough for run_loop. Each readline
-    awaits the next queued line; an empty bytes value signals EOF (which
-    run_loop treats as host-closed-stdin → clean exit)."""
-
-    def __init__(self, lines: list[bytes]):
-        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
-        for line in lines:
-            self._queue.put_nowait(line)
-        # Sentinel EOF so run_loop returns once the queue drains.
-        self._queue.put_nowait(b"")
-
-    async def readline(self) -> bytes:
-        return await self._queue.get()
-
-
-async def _drive_run_loop(lines: list[bytes], registry: dict) -> list[dict]:
-    """Run run_loop with a stub stdin reader and capture every write.
-
-    Patches _stdin_reader so we don't have to wire real OS pipes; the
-    actual dispatch / parse / id-tagging logic still runs unchanged."""
-    reader = _StubReader(lines)
-    captured: list[dict] = []
-
-    async def _fake_reader_factory():
-        return reader
-
-    original = commands._stdin_reader
-    commands._stdin_reader = _fake_reader_factory  # type: ignore[assignment]
-    try:
-        await commands.run_loop(captured.append, registry)
-    finally:
-        commands._stdin_reader = original  # type: ignore[assignment]
-    return captured
-
-
-async def test_run_loop_handles_unknown_command():
-    out = await _drive_run_loop(
-        [json.dumps({"id": 1, "cmd": "nope"}).encode() + b"\n"],
-        make_fake_registry(),
-    )
-    assert len(out) == 1
-    assert out[0]["id"] == 1
-    assert "error" in out[0]
-    assert "unknown command" in out[0]["error"]
-
-
-async def test_run_loop_handles_malformed_json():
-    out = await _drive_run_loop([b"{not json\n"], make_fake_registry())
-    assert len(out) == 1
-    assert "error" in out[0]
-
-
-async def test_run_loop_dispatches_status():
-    out = await _drive_run_loop(
-        [json.dumps({"id": 7, "cmd": "status"}).encode() + b"\n"],
-        make_fake_registry(),
-    )
-    assert out == [{"id": 7, "ok": True, "model": None, "device": None}]
-
-
-async def test_run_loop_exits_on_shutdown():
-    # The shutdown reply must be written before the loop returns so the
-    # host's send() unblocks before reaping the process.
-    out = await _drive_run_loop(
-        [
-            json.dumps({"id": 1, "cmd": "shutdown"}).encode() + b"\n",
-            # This second line should never be processed — shutdown returns.
-            json.dumps({"id": 2, "cmd": "status"}).encode() + b"\n",
-        ],
-        make_fake_registry(),
-    )
-    assert len(out) == 1
-    assert out[0]["id"] == 1
-    assert out[0]["ok"] is True
-
-
-async def test_run_loop_survives_handler_crash():
-    # A handler exception must not kill the loop — host can recover by
-    # sending a different command.
-    class Crasher(FakeModel):
-        name = "crasher"
-
-        async def load(self):
-            raise SystemError("kaboom")
-
-    registry = make_fake_registry(crasher=Crasher)
-    out = await _drive_run_loop(
-        [
-            json.dumps({"id": 1, "cmd": "load_model", "name": "crasher"}).encode() + b"\n",
-            json.dumps({"id": 2, "cmd": "status"}).encode() + b"\n",
-        ],
-        registry,
-    )
-    assert len(out) == 2
-    assert "error" in out[0]
-    assert out[1]["id"] == 2
-    assert out[1]["ok"] is True
 
 
 # --- _handle_download_model -------------------------------------------------

@@ -25,6 +25,11 @@ dependencies = [
     # non-darwin and a plain `uv sync` on Linux would fail without this
     # platform marker. moshi-torch users on Linux/CUDA simply skip it.
     "moshi-mlx>=0.2.0; sys_platform == 'darwin'",
+    # gRPC runtime for the worker IPC. The worker subprocess runs from
+    # this venv's interpreter, so the gRPC server lives here rather than
+    # in the shared scaffold's empty pyproject.
+    "grpcio>=1.60",
+    "protobuf>=4",
 ]
 
 # REASON: dev deps live here too because the moshi family's unit tests

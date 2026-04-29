@@ -40,10 +40,10 @@ func findWorkerDir(t *testing.T) string {
 	return ""
 }
 
-// TestIntegration_Spawn_HandshakeAndStatus verifies the end-to-end
-// stdin/stdout protocol against a real Python process. Doesn't load a
-// model — that would download GBs and take minutes. Just proves spawn,
-// handshake, one round-trip, and clean shutdown all work.
+// TestIntegration_Spawn_HandshakeAndStatus verifies the end-to-end gRPC
+// session against a real Python process spoken over a Unix-domain socket.
+// Doesn't load a model — that would download GBs and take minutes. Just
+// proves spawn, handshake, one round-trip, and clean shutdown all work.
 func TestIntegration_Spawn_HandshakeAndStatus(t *testing.T) {
 	dir := findWorkerDir(t)
 
@@ -59,10 +59,6 @@ func TestIntegration_Spawn_HandshakeAndStatus(t *testing.T) {
 		defer stopCancel()
 		_ = w.stop(stopCtx)
 	}()
-
-	if w.audioSock == "" {
-		t.Errorf("audio_socket missing from handshake")
-	}
 
 	reply, err := w.send(ctx, "status", nil)
 	if err != nil {

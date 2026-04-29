@@ -357,12 +357,20 @@ func int64Field(m map[string]any, k string) int64 {
 }
 
 func stringSliceField(m map[string]any, k string) []string {
-	raw, _ := m[k].([]any)
-	out := make([]string, 0, len(raw))
-	for _, v := range raw {
-		if s, ok := v.(string); ok {
-			out = append(out, s)
+	// Both shapes show up in practice: []string when the call site
+	// constructs the map in Go (e.g. buildClientMsg), []any when it
+	// came from a generic decoder. Handle either to keep callers terse.
+	switch v := m[k].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
 		}
+		return out
 	}
-	return out
+	return nil
 }

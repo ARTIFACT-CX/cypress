@@ -32,6 +32,10 @@ dependencies = [
     # hf_hub_download used directly for weight resolution / cache dirs,
     # mirroring the moshi family.
     "huggingface_hub>=0.24",
+    # gRPC runtime for the worker IPC. Same rationale as the moshi family
+    # — the subprocess runs from this venv's interpreter.
+    "grpcio>=1.60",
+    "protobuf>=4",
 ]
 
 # Dev deps mirror moshi's layout so pytest behaves identically when

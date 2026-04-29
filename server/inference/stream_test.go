@@ -7,7 +7,6 @@ package inference
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"testing"
 	"time"
@@ -162,10 +161,12 @@ func TestManager_StartStream_SurfacesWorkerError(t *testing.T) {
 	}
 }
 
-func TestStream_Feed_EncodesPCMAsBase64(t *testing.T) {
-	// The worker only accepts base64 strings on audio_in. A regression
-	// here (e.g. accidentally passing the raw []byte) would land as
-	// "invalid base64" 60 times a second once the audio path is wired.
+func TestStream_Feed_PassesPCMAsBytes(t *testing.T) {
+	// audio_in.pcm is native bytes on the gRPC wire — Feed must pass
+	// the buffer through without re-encoding. A regression here (e.g.
+	// accidentally base64-stringifying again) would land as a typed
+	// pcm field of the wrong shape and the worker would reject every
+	// frame.
 	fake := &fakeWorker{}
 	m := servingManager(t, fake)
 	stream, err := m.StartStream(context.Background())
@@ -179,22 +180,18 @@ func TestStream_Feed_EncodesPCMAsBase64(t *testing.T) {
 		t.Fatalf("Feed: %v", err)
 	}
 
-	// Find the audio_in call and decode its pcm field.
+	// Find the audio_in call and assert the bytes survived as-is.
 	var found bool
 	for _, c := range fake.sendCalls {
 		if c.cmd != "audio_in" {
 			continue
 		}
-		raw, ok := c.extra["pcm"].(string)
+		raw, ok := c.extra["pcm"].([]byte)
 		if !ok {
-			t.Fatalf("audio_in pcm field is %T, want string", c.extra["pcm"])
+			t.Fatalf("audio_in pcm field is %T, want []byte", c.extra["pcm"])
 		}
-		decoded, err := base64.StdEncoding.DecodeString(raw)
-		if err != nil {
-			t.Fatalf("decode pcm: %v", err)
-		}
-		if string(decoded) != string(pcm) {
-			t.Errorf("pcm round-trip = %v, want %v", decoded, pcm)
+		if string(raw) != string(pcm) {
+			t.Errorf("pcm = %v, want %v", raw, pcm)
 		}
 		found = true
 	}
@@ -236,7 +233,7 @@ func TestStream_Outputs_DemuxesAudioOutEvents(t *testing.T) {
 	pcm := []byte{0xaa, 0xbb, 0xcc}
 	fake.onEvent(map[string]any{
 		"event": "audio_out",
-		"pcm":   base64.StdEncoding.EncodeToString(pcm),
+		"pcm":   pcm,
 		"text":  "hi",
 	})
 
@@ -271,7 +268,7 @@ func TestStream_Outputs_DropsWhenConsumerSlow(t *testing.T) {
 		for i := 0; i < streamOutputBuffer*4; i++ {
 			fake.onEvent(map[string]any{
 				"event": "audio_out",
-				"pcm":   base64.StdEncoding.EncodeToString([]byte{byte(i)}),
+				"pcm":   []byte{byte(i)},
 				"text":  "",
 			})
 		}

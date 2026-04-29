@@ -2,21 +2,20 @@
 // Realtime streaming session against the Python worker. Pairs a single
 // open IPC stream (start_stream / audio_in / stop_stream) with the
 // worker→host audio_out / stream_error events that flow alongside,
-// hiding the base64 + JSON wire format behind plain []byte / string.
+// hiding the gRPC wire format behind plain []byte / string.
 //
 // Concurrency: at most one Stream per Manager, matching the worker's
 // own one-session-per-process limit (mimi/lm_gen are stateful). Manager
 // enforces this; callers see a clean error if they double-open.
 //
-// SWAP: this is the seam audio.Pipeline talks to. A future remote-
-// inference backend implements the same StreamSession shape against
-// gRPC streaming instead of stdin/stdout JSON.
+// SWAP: this is the seam audio.Pipeline talks to. The same shape is
+// used for remote (TCP+TLS) inference because the gRPC schema doesn't
+// care which transport backs it.
 
 package inference
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"sync"
@@ -80,10 +79,10 @@ func (s *Stream) Feed(ctx context.Context, pcm []byte) error {
 	if closed {
 		return errors.New("stream closed")
 	}
-	// Inline base64 keeps audio in the JSON IPC for v0.1; #20 tracks
-	// moving PCM to a sidechannel once profiling justifies the cost.
-	encoded := base64.StdEncoding.EncodeToString(pcm)
-	_, err := s.mgr.workerSend(ctx, "audio_in", map[string]any{"pcm": encoded})
+	// PCM rides as native bytes on the gRPC wire — no base64 tax. The
+	// adapter in wireconv.go pulls "pcm" out of the extra map and packs
+	// it into AudioInReq.pcm directly.
+	_, err := s.mgr.workerSend(ctx, "audio_in", map[string]any{"pcm": pcm})
 	return err
 }
 
@@ -237,19 +236,13 @@ func (m *Manager) dispatchStreamEvent(msg map[string]any) {
 	event, _ := msg["event"].(string)
 	switch event {
 	case "audio_out":
-		// pcm is base64 from the worker. Decode failures shouldn't kill
-		// the stream — surface a zero-PCM chunk with the error in text
-		// would be confusing; just drop the frame and log via stderr.
-		var pcm []byte
-		if encoded, ok := msg["pcm"].(string); ok {
-			if dec, err := base64.StdEncoding.DecodeString(encoded); err == nil {
-				pcm = dec
-			}
-		}
-		text := ""
-		if t, ok := msg["text"].(string); ok {
-			text = t
-		}
+		// pcm comes through as native []byte from the gRPC adapter
+		// (see wireconv.eventToMap) — no decode step. Missing/wrong
+		// type is a programming error in the wire layer; we surface
+		// a zero-PCM chunk rather than panicking so the consumer still
+		// sees the frame's text if any.
+		pcm, _ := msg["pcm"].([]byte)
+		text, _ := msg["text"].(string)
 		s.receive(StreamOutput{PCM: pcm, Text: text})
 	case "stream_error":
 		// Surfaced as a text-only chunk so the consumer sees something
