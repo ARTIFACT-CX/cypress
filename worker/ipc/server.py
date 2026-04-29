@@ -18,6 +18,8 @@ file is transport-agnostic.
 """
 
 import asyncio
+import ipaddress
+import secrets
 from typing import Any
 
 import grpc
@@ -26,6 +28,47 @@ from . import commands
 from .ports import ModelRegistry
 from workerpb import worker_pb2 as pb
 from workerpb import worker_pb2_grpc as pb_grpc
+
+
+# --- Auth --------------------------------------------------------------------
+#
+# A bearer-token interceptor sits in front of every RPC. The token is
+# whatever the operator passed via --token / CYPRESS_TOKEN at startup;
+# clients send it in the `authorization` metadata header (built by the
+# Go side's PerRPCCredentials). Missing or wrong → UNAUTHENTICATED.
+
+
+class AuthInterceptor(grpc.aio.ServerInterceptor):
+    """Reject any RPC whose authorization metadata != 'Bearer <token>'.
+
+    Cypress's auth model is intentionally simple: one shared secret per
+    worker process. Per-instance tokens are the recommended hygiene
+    (don't reuse across workers); short-lived JWTs are a follow-up."""
+
+    def __init__(self, token: str):
+        # SAFETY: pre-compute the expected header value so the per-RPC
+        # path is one string compare, not a concatenation.
+        self._expected = "Bearer " + token
+
+    async def intercept_service(self, continuation, handler_call_details):
+        # SAFETY: compare_digest defends against timing side-channels.
+        # Headers can repeat — first match wins, matching most servers'
+        # Authorization handling.
+        for key, value in handler_call_details.invocation_metadata or ():
+            if key == "authorization" and secrets.compare_digest(value, self._expected):
+                return await continuation(handler_call_details)
+        return _UNAUTH_HANDLER
+
+
+async def _abort_unauth(_request_iterator, context):
+    await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or invalid bearer token")
+
+
+# REASON: built once at import, returned by reference on every rejection.
+# Stream-stream because Worker.Session is the only RPC and it's bidi —
+# the wrong shape would surface as 'method not implemented' instead of
+# a clean auth error.
+_UNAUTH_HANDLER = grpc.stream_stream_rpc_method_handler(_abort_unauth)
 
 
 # --- Wire conversion ---------------------------------------------------------
@@ -225,30 +268,84 @@ class WorkerServicer(pb_grpc.WorkerServicer):
             await commands._stop_active_stream()
 
 
-async def serve(listen: str, registry: ModelRegistry) -> None:
+def _parse_listen(listen: str) -> tuple[str, bool, bool]:
+    """Validate the --listen target and return (gRPC bind string, is_tcp,
+    is_loopback). Mirrors the Go side's parseRemoteURL so both ends agree
+    on what counts as loopback (literal 127/8, ::1, or 'localhost')."""
+    if listen.startswith("unix:"):
+        return listen, False, False
+    if not listen.startswith("tcp://"):
+        raise ValueError(
+            f"unsupported listen target {listen!r}; use unix:<path> or tcp://host:port"
+        )
+    hostport = listen[len("tcp://") :]
+    # Split off port: rfind(':') handles ipv6 literals like [::1]:7843.
+    if ":" not in hostport:
+        raise ValueError(f"listen {listen!r}: host:port required")
+    host, _, port = hostport.rpartition(":")
+    if not host or not port:
+        raise ValueError(f"listen {listen!r}: host:port required")
+    # Strip ipv6 brackets for the loopback check; gRPC keeps them in bind.
+    bare = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    loopback = False
+    if bare.lower() == "localhost":
+        loopback = True
+    else:
+        try:
+            loopback = ipaddress.ip_address(bare).is_loopback
+        except ValueError:
+            loopback = False
+    return hostport, True, loopback
+
+
+async def serve(
+    listen: str,
+    registry: ModelRegistry,
+    *,
+    token: str | None = None,
+    tls: tuple[bytes, bytes] | None = None,
+) -> None:
     """Boot the gRPC server, bind the listen target, and block until a
     client requests shutdown. `listen` is one of:
 
       unix:<path>          local subprocess (file perms = auth)
-      tcp://host:port      remote worker (TLS / auth wired later)
+      tcp://host:port      remote worker (TLS required unless loopback)
 
+    token: shared secret enforced via AuthInterceptor on every RPC.
+    Required for any tcp:// listener; optional (but allowed) for unix.
+
+    tls: (cert_pem, key_pem) bytes. Required for tcp:// to a non-
+    loopback host so the bearer token never traverses cleartext.
     Returns once the server has fully stopped."""
+    bind, is_tcp, is_loopback = _parse_listen(listen)
+
+    # SAFETY: enforce the auth/transport invariants before we even build
+    # the server. A misconfigured remote (TCP open to the world without
+    # TLS or token) must fail at startup, not silently accept connections.
+    if is_tcp and not is_loopback and tls is None:
+        raise ValueError(
+            f"refusing to serve {listen!r}: non-loopback tcp:// requires --tls cert key"
+        )
+    if is_tcp and not token:
+        raise ValueError(
+            f"refusing to serve {listen!r}: tcp:// listeners require --token (or CYPRESS_TOKEN)"
+        )
+
     shutdown_event = asyncio.Event()
-    server = grpc.aio.server()
+    interceptors: list[grpc.aio.ServerInterceptor] = []
+    if token:
+        interceptors.append(AuthInterceptor(token))
+    server = grpc.aio.server(interceptors=interceptors)
     pb_grpc.add_WorkerServicer_to_server(
         WorkerServicer(registry, shutdown_event), server
     )
 
-    # REASON: gRPC accepts unix paths in the form `unix:<path>` but TCP
-    # targets as bare host:port. Translate our scheme prefix here so the
-    # CLI surface stays uniform across local and remote.
-    if listen.startswith("unix:"):
-        bind = listen
-    elif listen.startswith("tcp://"):
-        bind = listen[len("tcp://") :]
+    if tls is not None:
+        cert_pem, key_pem = tls
+        creds = grpc.ssl_server_credentials([(key_pem, cert_pem)])
+        server.add_secure_port(bind, creds)
     else:
-        raise ValueError(f"unsupported listen target {listen!r}; use unix:<path> or tcp://host:port")
-    server.add_insecure_port(bind)
+        server.add_insecure_port(bind)
 
     await server.start()
     try:

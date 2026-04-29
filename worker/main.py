@@ -85,7 +85,11 @@ def _default_listen() -> str:
     return f"unix:/tmp/cypress-{os.getpid()}.sock"
 
 
-async def _run(listen: str) -> None:
+async def _run(
+    listen: str,
+    token: str | None,
+    tls: tuple[bytes, bytes] | None,
+) -> None:
     # Cleanup the unix socket on exit so we don't leave stale files in
     # /tmp for the next run. TCP listeners self-clean.
     sock_path: str | None = None
@@ -98,13 +102,28 @@ async def _run(listen: str) -> None:
             pass
 
     try:
-        await ipc.serve(listen, models.REGISTRY)
+        await ipc.serve(listen, models.REGISTRY, token=token, tls=tls)
     finally:
         if sock_path is not None:
             try:
                 os.unlink(sock_path)
             except FileNotFoundError:
                 pass
+
+
+def _read_tls(args: argparse.Namespace) -> tuple[bytes, bytes] | None:
+    """Materialize --tls cert key into (cert_pem, key_pem) bytes. Wraps
+    the underlying FileNotFoundError so an operator typo points at which
+    flag was wrong instead of just a bare path."""
+    if not args.tls:
+        return None
+    cert_path, key_path = args.tls
+    try:
+        cert_pem = pathlib.Path(cert_path).read_bytes()
+        key_pem = pathlib.Path(key_path).read_bytes()
+    except OSError as e:
+        raise SystemExit(f"--tls: cannot read {e.filename!r}: {e.strerror}") from e
+    return cert_pem, key_pem
 
 
 def main() -> None:
@@ -117,11 +136,32 @@ def main() -> None:
             "default) or 'tcp://host:port' (remote worker)."
         ),
     )
+    parser.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "Bearer token clients must present. Falls back to CYPRESS_TOKEN "
+            "env var. Required for any tcp:// listener."
+        ),
+    )
+    parser.add_argument(
+        "--tls",
+        nargs=2,
+        metavar=("CERT", "KEY"),
+        default=None,
+        help=(
+            "PEM-encoded server certificate + private key paths. Required "
+            "for tcp:// to a non-loopback host so the bearer token never "
+            "rides cleartext."
+        ),
+    )
     args = parser.parse_args()
     listen = args.listen or _default_listen()
+    token = args.token or os.environ.get("CYPRESS_TOKEN") or None
+    tls = _read_tls(args)
 
     try:
-        asyncio.run(_run(listen))
+        asyncio.run(_run(listen, token, tls))
     except KeyboardInterrupt:
         # Ctrl-C from a manual run is not an error; exit cleanly.
         pass

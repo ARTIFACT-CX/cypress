@@ -25,6 +25,11 @@ dependencies = []
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    # REASON: ipc/server.py imports grpc at module load. Per-family venvs
+    # already pin grpcio for runtime; the shared venv only needs it so the
+    # unit tests in ipc/ can import the module under test.
+    "grpcio>=1.60",
+    "protobuf>=4",
 ]
 
 [tool.pytest.ini_options]
