@@ -1,15 +1,15 @@
-// AREA: inference · WORKER · GRPC
-// gRPC client implementation of workerHandle. Speaks the Worker.Session
-// bidi RPC defined in proto/cypress/worker/v1/worker.proto: every command
-// the Manager calls becomes a typed ClientMsg, every reply / event flowing
-// the other way is a typed ServerMsg. Wire conversion is contained in
-// wireconv.go so the rest of the file is plumbing.
+// AREA: workers · GRPC
+// gRPC client implementation of Handle. Speaks the Worker.Session
+// bidi RPC defined in proto/worker.proto: every command the caller
+// invokes via Send becomes a typed ClientMsg, every reply / event
+// flowing the other way is a typed ServerMsg. Wire conversion is
+// contained in wireconv.go so the rest of this file is plumbing.
 //
 // Two transports use this same code path:
-//   - Local subprocess: dial unix://<path>, see worker.go.
+//   - Local subprocess: dial unix://<path>, see spawn.go.
 //   - Remote worker: dial dns:///host:port + TLS + bearer auth (TODO).
 
-package inference
+package workers
 
 import (
 	"context"
@@ -21,7 +21,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
-	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -36,15 +35,15 @@ type reply struct {
 	err error
 }
 
-// grpcWorker is the live gRPC handle to one worker. Local and remote
-// flavors construct it the same way after their respective dials.
-type grpcWorker struct {
+// Grpc is the live gRPC handle to one worker. Local and remote flavors
+// construct it the same way after their respective dials.
+type Grpc struct {
 	conn   *grpc.ClientConn
 	stream grpc.BidiStreamingClient[pb.ClientMsg, pb.ServerMsg]
 	cancel context.CancelFunc
 
 	// cmd / sockPath are populated only for the local-subprocess flavor;
-	// nil for remote workers. stop() consults them to reap the process
+	// nil for remote workers. Stop() consults them to reap the process
 	// and clean up the unix socket.
 	cmd      *exec.Cmd
 	sockPath string
@@ -53,7 +52,7 @@ type grpcWorker struct {
 	// can route replies to the goroutine that issued the request.
 	nextID atomic.Uint64
 
-	// SAFETY: mu guards waiters. The recv loop and every send caller
+	// SAFETY: mu guards waiters. The recv loop and every Send caller
 	// touch it, so contention is possible but the critical sections are tiny.
 	mu      sync.Mutex
 	waiters map[uint64]chan reply
@@ -63,19 +62,19 @@ type grpcWorker struct {
 	sendCh chan *pb.ClientMsg
 
 	// onEvent handles unsolicited worker→host messages. Set by the
-	// Manager after spawn.
+	// caller after spawn.
 	onEvent func(map[string]any)
 
-	// done closes when the recv loop exits. Used to unblock send callers
+	// done closes when the recv loop exits. Used to unblock Send callers
 	// with a clear error rather than hanging forever.
 	done chan struct{}
 }
 
 // dialGRPC opens the Session bidi stream against `target` and waits
 // for the Handshake. The cmd / sockPath args are optional: pass them
-// for the local-subprocess flavor so stop() can reap and clean up;
+// for the local-subprocess flavor so Stop() can reap and clean up;
 // pass nil/"" for remote workers.
-func dialGRPC(ctx context.Context, target string, cmd *exec.Cmd, sockPath string) (*grpcWorker, error) {
+func dialGRPC(ctx context.Context, target string, cmd *exec.Cmd, sockPath string) (*Grpc, error) {
 	// REASON: insecure on a unix socket is fine — file perms are the
 	// auth. Remote (TCP) callers will swap this for credentials.NewTLS
 	// + a per-RPC bearer creds when that path lands.
@@ -141,7 +140,7 @@ func dialGRPC(ctx context.Context, target string, cmd *exec.Cmd, sockPath string
 		return nil, errors.New("worker handshake reported not ready")
 	}
 
-	w := &grpcWorker{
+	w := &Grpc{
 		conn:     conn,
 		stream:   stream,
 		cancel:   cancel,
@@ -162,8 +161,8 @@ func dialGRPC(ctx context.Context, target string, cmd *exec.Cmd, sockPath string
 
 // sendLoop owns stream.Send. Pulls ClientMsg values off sendCh and
 // writes them to the wire in arrival order. Exits when sendCh is
-// closed (stop) or Send returns an error (transport dead).
-func (w *grpcWorker) sendLoop() {
+// closed (Stop) or Send returns an error (transport dead).
+func (w *Grpc) sendLoop() {
 	for msg := range w.sendCh {
 		if err := w.stream.Send(msg); err != nil {
 			// Failed sends drain to the waiter via recvLoop's exit
@@ -181,7 +180,7 @@ func (w *grpcWorker) sendLoop() {
 // recvLoop owns stream.Recv. Each ServerMsg routes to either a
 // waiter (Reply) or the registered onEvent callback (Event); the
 // initial Handshake was consumed by dialGRPC.
-func (w *grpcWorker) recvLoop() {
+func (w *Grpc) recvLoop() {
 	defer close(w.done)
 	for {
 		msg, err := w.stream.Recv()
@@ -240,10 +239,10 @@ func (w *grpcWorker) recvLoop() {
 	w.mu.Unlock()
 }
 
-// send dispatches one command and blocks for its reply. Many goroutines
+// Send dispatches one command and blocks for its reply. Many goroutines
 // may call this in parallel; each gets its own correlation id and
 // waiter channel so replies don't cross.
-func (w *grpcWorker) send(ctx context.Context, cmd string, extra map[string]any) (map[string]any, error) {
+func (w *Grpc) Send(ctx context.Context, cmd string, extra map[string]any) (map[string]any, error) {
 	id := w.nextID.Add(1)
 	msg, err := buildClientMsg(id, cmd, extra)
 	if err != nil {
@@ -286,13 +285,13 @@ func (w *grpcWorker) send(ctx context.Context, cmd string, extra map[string]any)
 	}
 }
 
-// stop asks the worker to exit cleanly, closes the gRPC channel, then
+// Stop asks the worker to exit cleanly, closes the gRPC channel, then
 // (for local subprocesses) waits for the process. Honors ctx deadline
 // so server shutdown never hangs on an unresponsive worker.
-func (w *grpcWorker) stop(ctx context.Context) error {
+func (w *Grpc) Stop(ctx context.Context) error {
 	// Best-effort graceful shutdown over the wire. Errors here are
 	// ignored — we're about to tear the channel down either way.
-	_, _ = w.send(ctx, "shutdown", nil)
+	_, _ = w.Send(ctx, "shutdown", nil)
 
 	// Close send half to let the server's request iterator exit, then
 	// cancel the stream context so recvLoop unblocks.
@@ -320,10 +319,10 @@ func (w *grpcWorker) stop(ctx context.Context) error {
 	}
 }
 
-// setOnEvent is part of the workerHandle interface (see manager.go).
-// The Manager calls this immediately after spawn to register its
-// event handler.
-func (w *grpcWorker) setOnEvent(fn func(map[string]any)) { w.onEvent = fn }
+// SetOnEvent is part of the Handle interface. The caller (typically
+// inference.Manager) calls this immediately after spawn to register
+// its event handler.
+func (w *Grpc) SetOnEvent(fn func(map[string]any)) { w.onEvent = fn }
 
 // removeIfPresent unlinks the socket file if it still exists. The
 // kernel cleans up the socket binding when the Python process exits;
@@ -333,23 +332,10 @@ func removeIfPresent(path string) error {
 	if path == "" {
 		return nil
 	}
-	err := syscallUnlink(path)
+	err := syscall.Unlink(path)
 	if err != nil && !errors.Is(err, syscall.ENOENT) {
 		return err
 	}
 	return nil
 }
 
-// syscallUnlink wraps the unlink syscall to keep the import surface in
-// this file small. (os.Remove would also work; this is a stylistic nit
-// to avoid pulling "os" purely for cleanup.)
-func syscallUnlink(path string) error {
-	// PERF: zero-allocation unlink. Not material at this call rate but
-	// keeps the syscall path obvious.
-	return syscall.Unlink(path)
-}
-
-// suppress unused-import warning during early scaffolding when stop
-// might not yet route through ctx-deadline branches in tests. Once
-// integration coverage exercises stop, this no-op goes away.
-var _ = time.Second

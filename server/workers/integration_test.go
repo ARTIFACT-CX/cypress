@@ -1,15 +1,15 @@
 //go:build integration
 
-// AREA: inference · TESTS · INTEGRATION
+// AREA: workers · TESTS · INTEGRATION
 // Runs against a real Python worker subprocess. Gated by the `integration`
 // build tag so default `go test ./...` stays fast and dependency-free; run
 // explicitly with:
 //
-//	go test -tags=integration ./inference/...
+//	go test -tags=integration ./workers/...
 //
 // Requires `uv` on PATH and the worker/ directory's deps installed.
 
-package inference
+package workers
 
 import (
 	"context"
@@ -20,7 +20,7 @@ import (
 )
 
 // findWorkerDir walks up from the test's CWD looking for a sibling `worker`
-// directory. Lets the integration test run from server/ or server/inference/
+// directory. Lets the integration test run from server/ or server/workers/
 // without hardcoding paths.
 func findWorkerDir(t *testing.T) string {
 	t.Helper()
@@ -50,17 +50,17 @@ func TestIntegration_Spawn_HandshakeAndStatus(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	w, err := spawnWorker(ctx, dir, "moshi")
+	w, err := SpawnLocal(ctx, dir, "moshi")
 	if err != nil {
-		t.Fatalf("spawnWorker: %v", err)
+		t.Fatalf("SpawnLocal: %v", err)
 	}
 	defer func() {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stopCancel()
-		_ = w.stop(stopCtx)
+		_ = w.Stop(stopCtx)
 	}()
 
-	reply, err := w.send(ctx, "status", nil)
+	reply, err := w.Send(ctx, "status", nil)
 	if err != nil {
 		t.Fatalf("send status: %v", err)
 	}

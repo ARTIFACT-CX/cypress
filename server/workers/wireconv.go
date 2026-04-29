@@ -1,15 +1,16 @@
-// AREA: inference · WORKER · WIRE
-// Conversion between the Manager's plain map[string]any contract and
+// AREA: workers · WIRE
+// Conversion between the Handle's plain map[string]any contract and
 // the typed proto messages on the wire. Living in one place keeps the
 // (cmd, extra) ↔ ClientMsg / ServerMsg switches grep-able and out of
-// the Manager + grpcWorker plumbing.
+// the Grpc plumbing.
 //
-// REASON: the workerHandle interface still hands callers map[string]any
-// so we don't have to refactor Manager + Stream + every test in this
-// pass. Future cleanup can pull typed replies up through the interface;
-// the gRPC schema is already there to support it.
+// REASON: the Handle interface still hands callers map[string]any so
+// we don't have to refactor every call site (Manager, downloads,
+// Stream, every test) in this pass. Future cleanup can pull typed
+// replies up through the interface; the gRPC schema is already there
+// to support it.
 
-package inference
+package workers
 
 import (
 	"fmt"
@@ -19,7 +20,7 @@ import (
 
 // buildClientMsg packs (cmd, extra) into a ClientMsg with the right
 // oneof variant. Unknown commands are an internal-bug error — the
-// Manager should only emit names from this whitelist.
+// orchestration code should only emit names from this whitelist.
 func buildClientMsg(id uint64, cmd string, extra map[string]any) (*pb.ClientMsg, error) {
 	out := &pb.ClientMsg{Id: id}
 	switch cmd {
@@ -27,7 +28,7 @@ func buildClientMsg(id uint64, cmd string, extra map[string]any) (*pb.ClientMsg,
 		out.Payload = &pb.ClientMsg_Status{Status: &pb.StatusReq{}}
 	case "load_model":
 		out.Payload = &pb.ClientMsg_LoadModel{LoadModel: &pb.LoadModelReq{
-			Name: stringField(extra, "name"),
+			Name: StringField(extra, "name"),
 		}}
 	case "unload":
 		out.Payload = &pb.ClientMsg_Unload{Unload: &pb.UnloadReq{}}
@@ -35,8 +36,8 @@ func buildClientMsg(id uint64, cmd string, extra map[string]any) (*pb.ClientMsg,
 		out.Payload = &pb.ClientMsg_Shutdown{Shutdown: &pb.ShutdownReq{}}
 	case "run_wav":
 		out.Payload = &pb.ClientMsg_RunWav{RunWav: &pb.RunWavReq{
-			Input:  stringField(extra, "input"),
-			Output: stringField(extra, "output"),
+			Input:  StringField(extra, "input"),
+			Output: StringField(extra, "output"),
 		}}
 	case "start_stream":
 		out.Payload = &pb.ClientMsg_StartStream{StartStream: &pb.StartStreamReq{}}
@@ -48,9 +49,9 @@ func buildClientMsg(id uint64, cmd string, extra map[string]any) (*pb.ClientMsg,
 		out.Payload = &pb.ClientMsg_StopStream{StopStream: &pb.StopStreamReq{}}
 	case "download_model":
 		req := &pb.DownloadModelReq{
-			Name:  stringField(extra, "name"),
-			Repo:  stringField(extra, "repo"),
-			Files: stringSliceField(extra, "files"),
+			Name:  StringField(extra, "name"),
+			Repo:  StringField(extra, "repo"),
+			Files: StringSliceField(extra, "files"),
 		}
 		if rev, ok := extra["revision"].(string); ok && rev != "" {
 			req.Revision = &rev
@@ -66,8 +67,8 @@ func buildClientMsg(id uint64, cmd string, extra map[string]any) (*pb.ClientMsg,
 
 // replyToMap converts a typed Reply back into the legacy dict shape.
 // Empty/zero fields are deliberately included for the keys callers
-// expect (e.g. "ok": true) so the Manager's map lookups don't have
-// to change.
+// expect (e.g. "ok": true) so callers' map lookups don't have to
+// change.
 func replyToMap(r *pb.Reply) map[string]any {
 	out := map[string]any{"ok": true}
 	switch v := r.GetResult().(type) {
@@ -102,10 +103,9 @@ func replyToMap(r *pb.Reply) map[string]any {
 }
 
 // eventToMap converts a typed Event into the legacy dict shape with the
-// "event" string field that handleEvent + dispatchStreamEvent +
-// handleDownloadEvent all key off. Unknown variants return nil so the
-// recv loop drops them silently rather than calling onEvent with
-// something it can't dispatch.
+// "event" string field that downstream handlers key off. Unknown
+// variants return nil so the recv loop drops them silently rather than
+// calling onEvent with something it can't dispatch.
 func eventToMap(e *pb.Event) map[string]any {
 	switch v := e.GetPayload().(type) {
 	case *pb.Event_ModelPhase:
@@ -131,9 +131,9 @@ func eventToMap(e *pb.Event) map[string]any {
 	case *pb.Event_DownloadProgress:
 		p := v.DownloadProgress
 		// Numeric fields cast to float64 to match the JSON-era shape
-		// (encoding/json decoded all numbers as float64). The download
-		// event handler in downloads.go already does float64 type
-		// assertions; keeping the shape stable means no churn there.
+		// (encoding/json decoded all numbers as float64). Downstream
+		// handlers do float64 type assertions; keeping the shape
+		// stable means no churn there.
 		return map[string]any{
 			"event":      "download_progress",
 			"name":       p.GetName(),
@@ -167,9 +167,68 @@ func eventToMap(e *pb.Event) map[string]any {
 	return nil
 }
 
-// --- small typed helpers (keep buildClientMsg readable) -------------
-// stringField / stringSliceField live in downloads.go (shared).
+// --- field helpers ----------------------------------------------------
+//
+// IPC events arrive as map[string]any; pulling typed values out of
+// them ergonomically is verbose without these. Exported because
+// downstream packages (downloads.Service.HandleEvent) consume the
+// same shape and need the same accessors.
 
+// StringField returns the string at k, or "" if missing/wrong type.
+func StringField(m map[string]any, k string) string {
+	v, _ := m[k].(string)
+	return v
+}
+
+// IntField extracts an int from any of the numeric shapes the
+// gRPC adapter or a JSON decoder might surface (float64 / int / int64).
+func IntField(m map[string]any, k string) int {
+	switch v := m[k].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	}
+	return 0
+}
+
+// Int64Field is the int64 counterpart of IntField.
+func Int64Field(m map[string]any, k string) int64 {
+	switch v := m[k].(type) {
+	case float64:
+		return int64(v)
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	}
+	return 0
+}
+
+// StringSliceField handles both shapes that show up in practice:
+// []string when constructed in Go (e.g. buildClientMsg's input map)
+// and []any when it came from a generic decoder.
+func StringSliceField(m map[string]any, k string) []string {
+	switch v := m[k].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// bytesField is private — only the wire conversion needs raw byte
+// extraction (for audio_in.pcm). Downstream consumers see the bytes
+// already typed via the per-event map.
 func bytesField(m map[string]any, k string) []byte {
 	if v, ok := m[k].([]byte); ok {
 		return v

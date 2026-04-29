@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ARTIFACT-CX/cypress/server/workers"
 )
 
 // fakeWorker stands in for the real *worker in tests. Each behavior the
@@ -44,7 +46,7 @@ type sendCall struct {
 	extra map[string]any
 }
 
-func (f *fakeWorker) send(ctx context.Context, cmd string, extra map[string]any) (map[string]any, error) {
+func (f *fakeWorker) Send(ctx context.Context, cmd string, extra map[string]any) (map[string]any, error) {
 	f.mu.Lock()
 	f.sendCalls = append(f.sendCalls, sendCall{cmd: cmd, extra: extra})
 	fn := f.sendFn
@@ -55,7 +57,7 @@ func (f *fakeWorker) send(ctx context.Context, cmd string, extra map[string]any)
 	return map[string]any{"ok": true}, nil
 }
 
-func (f *fakeWorker) stop(ctx context.Context) error {
+func (f *fakeWorker) Stop(ctx context.Context) error {
 	f.mu.Lock()
 	fn := f.stopFn
 	f.mu.Unlock()
@@ -65,7 +67,7 @@ func (f *fakeWorker) stop(ctx context.Context) error {
 	return f.stopErr
 }
 
-func (f *fakeWorker) setOnEvent(fn func(map[string]any)) {
+func (f *fakeWorker) SetOnEvent(fn func(map[string]any)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.onEvent = fn
@@ -92,7 +94,7 @@ func waitForState(t *testing.T, m *Manager, want State) Snapshot {
 // Returned alongside the fake so tests can assert on send calls / fire
 // events.
 func newTestManager(fake *fakeWorker) *Manager {
-	return newManagerWithSpawn(func(_ context.Context, _ string) (workerHandle, error) {
+	return newManagerWithSpawn(func(_ context.Context, _ string) (workers.Handle, error) {
 		return fake, nil
 	})
 }
@@ -179,7 +181,7 @@ func TestManager_LoadModel_RejectsWhenBusy(t *testing.T) {
 }
 
 func TestManager_LoadModel_SpawnFailure_ReturnsToIdle(t *testing.T) {
-	m := newManagerWithSpawn(func(_ context.Context, _ string) (workerHandle, error) {
+	m := newManagerWithSpawn(func(_ context.Context, _ string) (workers.Handle, error) {
 		return nil, errors.New("uv not found")
 	})
 

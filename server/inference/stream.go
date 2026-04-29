@@ -164,7 +164,7 @@ func (m *Manager) StartStream(ctx context.Context) (*Stream, error) {
 		return nil, errors.New("no worker")
 	}
 
-	reply, err := w.send(ctx, "start_stream", nil)
+	reply, err := w.Send(ctx, "start_stream", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +189,7 @@ func (m *Manager) StartStream(ctx context.Context) (*Stream, error) {
 	// the slot wins; the loser tears their own session down.
 	if m.activeStream != nil {
 		m.mu.Unlock()
-		_, _ = w.send(ctx, "stop_stream", nil)
+		_, _ = w.Send(ctx, "stop_stream", nil)
 		return nil, errors.New("stream slot taken by concurrent caller")
 	}
 	m.activeStream = s
@@ -217,7 +217,7 @@ func (m *Manager) workerSend(ctx context.Context, cmd string, extra map[string]a
 	if w == nil {
 		return nil, errors.New("worker not running")
 	}
-	return w.send(ctx, cmd, extra)
+	return w.Send(ctx, cmd, extra)
 }
 
 // dispatchStreamEvent is called from Manager.handleEvent for audio_out

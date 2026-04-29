@@ -1,10 +1,10 @@
-// AREA: inference · TESTS
-// Unit tests for the gRPC IPC layer in grpc_worker.go + wireconv.go.
-// These don't spawn a real Python process — they construct a grpcWorker
-// against an in-memory bufconn-backed gRPC server with a hand-rolled
-// servicer that echoes back exactly what the test wants.
+// AREA: workers · TESTS
+// Unit tests for the gRPC IPC layer in grpc.go + wireconv.go. These
+// don't spawn a real Python process — they construct a Grpc against an
+// in-memory bufconn-backed gRPC server with a hand-rolled servicer
+// that echoes back exactly what the test wants.
 
-package inference
+package workers
 
 import (
 	"context"
@@ -78,8 +78,9 @@ func (s *testServicer) Session(stream grpc.BidiStreamingServer[pb.ClientMsg, pb.
 }
 
 // startBufconnServer spins up a Worker gRPC server backed by an
-// in-memory net.Conn. Returns a dial helper the test feeds to
-// dialGRPC.
+// in-memory net.Conn. Returns a dial helper the test feeds to a
+// custom client builder (we can't reuse dialGRPC directly because
+// it builds a unix-socket dial; bufconn needs WithContextDialer).
 func startBufconnServer(t *testing.T, svc *testServicer) (dialer func(context.Context, string) (net.Conn, error), shutdown func()) {
 	t.Helper()
 	lis := bufconn.Listen(1 << 16)
@@ -96,11 +97,10 @@ func startBufconnServer(t *testing.T, svc *testServicer) (dialer func(context.Co
 	return dialer, shutdown
 }
 
-// connectTestWorker is the test-only counterpart to dialGRPC. We can't
-// reuse dialGRPC directly because it builds a unix-socket dial; bufconn
-// needs WithContextDialer. The wire / waiter / send-loop logic is the
-// same — only the dial differs.
-func connectTestWorker(t *testing.T, svc *testServicer) (*grpcWorker, func()) {
+// connectTestWorker is the test-only counterpart to dialGRPC. The
+// wire / waiter / send-loop logic is the same — only the dial
+// differs.
+func connectTestWorker(t *testing.T, svc *testServicer) (*Grpc, func()) {
 	t.Helper()
 	dialer, shutdown := startBufconnServer(t, svc)
 
@@ -138,7 +138,7 @@ func connectTestWorker(t *testing.T, svc *testServicer) (*grpcWorker, func()) {
 		t.Fatalf("bad handshake: %v", first)
 	}
 
-	w := &grpcWorker{
+	w := &Grpc{
 		conn:    conn,
 		stream:  stream,
 		cancel:  cancel,
@@ -158,7 +158,7 @@ func connectTestWorker(t *testing.T, svc *testServicer) (*grpcWorker, func()) {
 	return w, cleanup
 }
 
-func TestGRPCWorker_Send_RoutesReplyByID(t *testing.T) {
+func TestGrpc_Send_RoutesReplyByID(t *testing.T) {
 	svc := &testServicer{}
 	model, device := "moshi", "mps"
 	svc.onMsg = func(msg *pb.ClientMsg, stream grpc.BidiStreamingServer[pb.ClientMsg, pb.ServerMsg]) {
@@ -171,9 +171,9 @@ func TestGRPCWorker_Send_RoutesReplyByID(t *testing.T) {
 	w, cleanup := connectTestWorker(t, svc)
 	defer cleanup()
 
-	out, err := w.send(context.Background(), "status", nil)
+	out, err := w.Send(context.Background(), "status", nil)
 	if err != nil {
-		t.Fatalf("send: %v", err)
+		t.Fatalf("Send: %v", err)
 	}
 	if out["device"] != "mps" {
 		t.Errorf("device = %v, want mps", out["device"])
@@ -183,7 +183,7 @@ func TestGRPCWorker_Send_RoutesReplyByID(t *testing.T) {
 	}
 }
 
-func TestGRPCWorker_Send_ParallelCallsDontCross(t *testing.T) {
+func TestGrpc_Send_ParallelCallsDontCross(t *testing.T) {
 	// Two concurrent sends must each get their own reply. Reply in
 	// reverse order to prove correlation isn't FIFO-dependent.
 	var (
@@ -222,11 +222,11 @@ func TestGRPCWorker_Send_ParallelCallsDontCross(t *testing.T) {
 	resA := make(chan result, 1)
 	resB := make(chan result, 1)
 	go func() {
-		out, err := w.send(context.Background(), "status", nil)
+		out, err := w.Send(context.Background(), "status", nil)
 		resA <- result{out, err}
 	}()
 	go func() {
-		out, err := w.send(context.Background(), "unload", nil)
+		out, err := w.Send(context.Background(), "unload", nil)
 		resB <- result{out, err}
 	}()
 
@@ -250,9 +250,9 @@ func TestGRPCWorker_Send_ParallelCallsDontCross(t *testing.T) {
 	}
 }
 
-func TestGRPCWorker_Send_SurfacesErrorField(t *testing.T) {
+func TestGrpc_Send_SurfacesErrorField(t *testing.T) {
 	// Reply with a string error in the oneof — must come back as a Go
-	// error from send().
+	// error from Send().
 	svc := &testServicer{}
 	svc.onMsg = func(msg *pb.ClientMsg, stream grpc.BidiStreamingServer[pb.ClientMsg, pb.ServerMsg]) {
 		_ = stream.Send(&pb.ServerMsg{Payload: &pb.ServerMsg_Reply{
@@ -262,13 +262,13 @@ func TestGRPCWorker_Send_SurfacesErrorField(t *testing.T) {
 	w, cleanup := connectTestWorker(t, svc)
 	defer cleanup()
 
-	_, err := w.send(context.Background(), "load_model", map[string]any{"name": "foo"})
+	_, err := w.Send(context.Background(), "load_model", map[string]any{"name": "foo"})
 	if err == nil || !strings.Contains(err.Error(), "unknown model") {
 		t.Fatalf("err = %v, want one containing 'unknown model'", err)
 	}
 }
 
-func TestGRPCWorker_Send_RespectsContextCancel(t *testing.T) {
+func TestGrpc_Send_RespectsContextCancel(t *testing.T) {
 	// Server never replies — cancellation must unblock send.
 	svc := &testServicer{onMsg: func(*pb.ClientMsg, grpc.BidiStreamingServer[pb.ClientMsg, pb.ServerMsg]) {}}
 	w, cleanup := connectTestWorker(t, svc)
@@ -277,7 +277,7 @@ func TestGRPCWorker_Send_RespectsContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := w.send(ctx, "status", nil)
+		_, err := w.Send(ctx, "status", nil)
 		done <- err
 	}()
 	cancel()
@@ -292,7 +292,7 @@ func TestGRPCWorker_Send_RespectsContextCancel(t *testing.T) {
 	}
 }
 
-func TestGRPCWorker_RecvLoop_RoutesEvents(t *testing.T) {
+func TestGrpc_RecvLoop_RoutesEvents(t *testing.T) {
 	// Server pushes an Event without any prompting; the registered
 	// onEvent callback must fire with the legacy dict shape.
 	svc := &testServicer{}
@@ -304,7 +304,7 @@ func TestGRPCWorker_RecvLoop_RoutesEvents(t *testing.T) {
 			}},
 		}})
 		<-pushed
-		// Reply to the original client send so the test's send() returns.
+		// Reply to the original client send so the test's Send() returns.
 		_ = stream.Send(&pb.ServerMsg{Payload: &pb.ServerMsg_Reply{
 			Reply: &pb.Reply{Id: 1, Result: &pb.Reply_Ok{Ok: &pb.OkEmpty{}}},
 		}})
@@ -316,7 +316,7 @@ func TestGRPCWorker_RecvLoop_RoutesEvents(t *testing.T) {
 		mu       sync.Mutex
 		captured []map[string]any
 	)
-	w.setOnEvent(func(m map[string]any) {
+	w.SetOnEvent(func(m map[string]any) {
 		mu.Lock()
 		captured = append(captured, m)
 		mu.Unlock()
@@ -324,7 +324,7 @@ func TestGRPCWorker_RecvLoop_RoutesEvents(t *testing.T) {
 
 	// Trigger the servicer by sending any command; the servicer pushes
 	// an event before replying. We drive the wait via close(pushed).
-	go func() { _, _ = w.send(context.Background(), "status", nil) }()
+	go func() { _, _ = w.Send(context.Background(), "status", nil) }()
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {

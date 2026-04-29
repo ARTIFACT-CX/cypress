@@ -1,7 +1,7 @@
-// AREA: inference · MANIFEST
+// AREA: models · MANIFEST
 // Persistent record of which models the user has installed. We treat
 // this as the canonical "is the model available" answer — separate
-// from the HF cache probe in catalog.go, which only tells us whether
+// from the HF cache probe in cache.go, which only tells us whether
 // some files happen to live in HF's cache directory. The manifest
 // records intent: "the user installed this model on this date with
 // these files at this revision."
@@ -15,7 +15,7 @@
 // SAFETY: every write goes through atomic rename (write tmp, rename
 // over). A crash mid-save loses the in-flight change, never the file.
 
-package inference
+package models
 
 import (
 	"encoding/json"
@@ -190,4 +190,3 @@ func (m *Manifest) All() map[string]ManifestEntry {
 	}
 	return out
 }
-

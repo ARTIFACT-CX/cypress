@@ -1,13 +1,14 @@
-// AREA: inference · SUBPROCESS
-// Owns the Python inference worker lifecycle. Responsible for launching,
-// health-checking, and tearing down the Python process that loads models and
-// does the actual generation. The Go side never imports PyTorch — this is the
-// only bridge.
+// AREA: inference · MANAGER
+// Owns the Python inference worker lifecycle and the load state machine.
+// Coordinates the workers/ adapter (subprocess + gRPC), the downloads/
+// service (HF pulls), and the models/ manifest. Anything model-flavored
+// that crosses those packages comes back through here so the load
+// state and download state stay coherent.
 //
-// SWAP: the worker backend. Today this shells out to a Python subprocess; a
-// future implementation could target a remote gRPC inference server (cloud
-// tier). Consumers should depend on the Manager interface, not on subprocess
-// details.
+// SWAP: the worker backend lives behind workers.Handle. Today the spawn
+// closure shells out to a Python subprocess via workers.SpawnLocal; a
+// future remote-inference backend slots in by injecting a different
+// spawn closure that dials a gRPC endpoint.
 
 package inference
 
@@ -18,6 +19,10 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/ARTIFACT-CX/cypress/server/downloads"
+	"github.com/ARTIFACT-CX/cypress/server/models"
+	"github.com/ARTIFACT-CX/cypress/server/workers"
 )
 
 // loadTimeout caps how long a single model load can run. First-run HF
@@ -25,11 +30,6 @@ import (
 // budget generously — but bound it so a wedged loader can't pin the
 // worker forever and silently swallow further requests.
 const loadTimeout = 15 * time.Minute
-
-// downloadTimeout caps a single download. Same rationale as loadTimeout
-// but a bit more generous since download alone (without subsequent
-// load) is the whole budget here.
-const downloadTimeout = 20 * time.Minute
 
 // State is the public lifecycle of the inference subsystem. The UI polls
 // this to render "loading…", enable/disable buttons, etc.
@@ -43,24 +43,11 @@ const (
 	StateServing  State = "serving"  // worker alive, model loaded
 )
 
-// workerHandle is the part of the worker subprocess Manager actually uses.
-// Declared as an interface so unit tests can swap in a fake without
-// spawning a real Python process. The concrete *worker satisfies it.
-//
-// SWAP: this is the seam between Manager (business logic) and the
-// outbound subprocess adapter. A future remote-inference backend
-// implements the same interface against gRPC instead of stdin/stdout.
-type workerHandle interface {
-	send(ctx context.Context, cmd string, extra map[string]any) (map[string]any, error)
-	stop(ctx context.Context) error
-	setOnEvent(fn func(map[string]any))
-}
-
-// spawnFn is the constructor for a workerHandle. NewManager defaults this
-// to a closure over the configured workerDir; tests inject a fake. The
+// SpawnFn is the constructor for a workers.Handle. NewManager defaults
+// this to a closure over workers.SpawnLocal; tests inject a fake. The
 // family argument selects which per-family Python venv
 // (worker/models/<family>/.venv) the subprocess is launched from.
-type spawnFn func(ctx context.Context, family string) (workerHandle, error)
+type SpawnFn func(ctx context.Context, family string) (workers.Handle, error)
 
 // Manager is the Go-side handle to the Python inference worker.
 type Manager struct {
@@ -70,16 +57,16 @@ type Manager struct {
 	// "busy" error from the state check.
 	mu     sync.Mutex
 	state  State
-	worker workerHandle
+	worker workers.Handle
 	// workerFamily is the model family the running worker subprocess was
-	// spawned for (matches catalogEntry.Family). Empty when no worker is
+	// spawned for (matches models.Entry.Family). Empty when no worker is
 	// up. Used to refuse load/download requests that would require
 	// swapping the Python venv mid-session — the host shuts the worker
 	// down first instead.
 	workerFamily string
 	model        string
 	device       string // populated on successful load; "mps" / "cuda" / "cpu"
-	phase        string // current loader phase ("downloading_mimi", etc.), cleared on ready
+	phase        string // current loader phase ("downloading_lm", etc.), cleared on ready
 	// lastError stores the most recent load failure so the UI can surface it
 	// even when it polled in after the failing HTTP request already returned.
 	// Cleared when a new load starts so stale errors don't linger.
@@ -87,47 +74,29 @@ type Manager struct {
 
 	// spawn is the worker constructor. Defaults to the real subprocess
 	// spawner; tests override via newManagerWithSpawn.
-	spawn spawnFn
+	spawn SpawnFn
 
 	// activeStream is the at-most-one streaming session against this
 	// worker. nil when idle. Guarded by mu — see stream.go for the
 	// lifecycle hooks (StartStream / detachStream).
 	activeStream *Stream
 
-	// manifest is the on-disk record of installed models. Owned by the
-	// manager so download completion can update it under mu without an
-	// extra lock. nil-safe: a nil manifest just means we can't persist
-	// installs (used in unit tests that don't care about disk state).
-	manifest *Manifest
+	// envSetup owns per-family venv preparation/removal. Composition
+	// root injects it; tests use a no-op via newManagerWithSpawn.
+	envSetup *workers.EnvSetup
 
-	// inflightDownloads tracks live download progress per model name,
-	// keyed for quick lookup when the worker emits download_progress
-	// events. Cleared on download_done / download_error / cancellation.
-	inflightDownloads map[string]*DownloadProgress
+	// manifest is the on-disk record of installed models. Read here for
+	// the family-removal policy (any sibling installed?). Owned by the
+	// composition root and shared with the downloads service.
+	manifest *models.Manifest
 
-	// familySetupMu serializes per-family `uv sync` runs so two
-	// concurrent downloads against the same family don't race on the
-	// venv directory. Lazily populated; lookup is guarded by mu but
-	// the Lock/Unlock on the inner mutex happens without mu held.
-	familySetupMu map[string]*sync.Mutex
-
-	// syncFamily creates / refreshes the Python venv for a family.
-	// Defaults to running `uv sync`; tests inject a fake to avoid
-	// shelling out. SWAP seam for a future packaged build that ships
-	// a pre-baked venv and wants this to be a no-op.
-	syncFamily func(ctx context.Context, family string) error
-
-	// workerDir is the resolved path to the worker/ scaffold root. Used
-	// to locate per-family venvs (workerDir/models/<family>/.venv) and
-	// for the spawned process's cwd. Injected via Config so tests can
-	// point at a tmpdir and the composition root can resolve a packaged-
-	// app path via os.Executable() without this package knowing how.
-	workerDir string
+	// downloads is the download/cancel/delete service. Manager satisfies
+	// downloads.WorkerProvider so the service can spawn/reuse this
+	// Manager's worker for download IPC.
+	downloads *downloads.Service
 }
 
 // Config is the composition-root contract for building a Manager.
-// Both fields are required in production; tests construct Managers via
-// the package-internal helpers below and don't go through Config.
 type Config struct {
 	// WorkerDir points at the worker/ scaffold (Python entrypoint +
 	// models/<family>/.venv subtrees). main.go resolves this from
@@ -160,42 +129,38 @@ type Snapshot struct {
 // open the manifest is logged but non-fatal — we degrade to a memory-
 // only manifest so the rest of the server still runs.
 func NewManager(cfg Config) *Manager {
-	mf, err := NewManifest(cfg.DataDir)
+	mf, err := models.NewManifest(cfg.DataDir)
 	if err != nil {
 		log.Printf("manifest open failed (continuing without persistence): %v", err)
 		mf = nil
 	}
-	workerDir := cfg.WorkerDir
-	return &Manager{
-		state:     StateIdle,
-		workerDir: workerDir,
-		// REASON: close over workerDir so the spawn/syncFamily defaults
-		// remain context.Context-only at the call sites — Manager
-		// internals don't need to thread the path through every call.
-		spawn: func(ctx context.Context, family string) (workerHandle, error) {
-			return spawnWorker(ctx, workerDir, family)
+	envSetup := workers.NewEnvSetup(cfg.WorkerDir, nil)
+	m := &Manager{
+		state:    StateIdle,
+		envSetup: envSetup,
+		manifest: mf,
+		// REASON: close over workerDir so the spawn default remains
+		// context.Context-only at the call sites — Manager internals
+		// don't thread the path through every call.
+		spawn: func(ctx context.Context, family string) (workers.Handle, error) {
+			return workers.SpawnLocal(ctx, cfg.WorkerDir, family)
 		},
-		syncFamily: func(ctx context.Context, family string) error {
-			return defaultSyncFamily(ctx, workerDir, family)
-		},
-		manifest:          mf,
-		inflightDownloads: map[string]*DownloadProgress{},
-		familySetupMu:     map[string]*sync.Mutex{},
 	}
+	m.downloads = downloads.New(m, envSetup, mf)
+	return m
 }
 
-// newManagerWithSpawn is the test constructor. Lets a unit test inject a
-// fake spawner without going through subprocess machinery. syncFamily
-// defaults to a no-op so tests don't need a real uv on PATH. Tests that
-// exercise venv lifecycle paths set m.workerDir directly afterwards.
-func newManagerWithSpawn(spawn spawnFn) *Manager {
-	return &Manager{
-		state:             StateIdle,
-		spawn:             spawn,
-		syncFamily:        func(_ context.Context, _ string) error { return nil },
-		inflightDownloads: map[string]*DownloadProgress{},
-		familySetupMu:     map[string]*sync.Mutex{},
+// newManagerWithSpawn is the test constructor. Lets a unit test inject
+// a fake spawner without going through subprocess machinery. envSetup
+// is nil (Service skips Ensure) and manifest is nil unless the test
+// supplies one via setManifest.
+func newManagerWithSpawn(spawn SpawnFn) *Manager {
+	m := &Manager{
+		state: StateIdle,
+		spawn: spawn,
 	}
+	m.downloads = downloads.New(m, nil, nil)
+	return m
 }
 
 // LoadModel kicks off a model load. Returns synchronously as soon as the
@@ -215,7 +180,7 @@ func (m *Manager) LoadModel(name string) error {
 	// STEP 0: pre-flight the catalog so we know which family to spawn
 	// (and which venv that selects). Unknown / unavailable models fail
 	// here rather than after we've spawned a worker for nothing.
-	entry := catalogEntryByName(name)
+	entry := models.EntryByName(name)
 	if entry == nil {
 		return fmt.Errorf("unknown model %q", name)
 	}
@@ -283,14 +248,16 @@ func (m *Manager) doLoad(ctx context.Context, name string, family string) {
 		m.mu.Lock()
 		m.phase = "preparing_env"
 		m.mu.Unlock()
-		if err := m.ensureFamilyEnv(ctx, family); err != nil {
-			m.mu.Lock()
-			m.state = StateIdle
-			m.phase = ""
-			m.lastError = err.Error()
-			m.mu.Unlock()
-			log.Printf("ensure family env failed: %v", err)
-			return
+		if m.envSetup != nil {
+			if err := m.envSetup.Ensure(ctx, family); err != nil {
+				m.mu.Lock()
+				m.state = StateIdle
+				m.phase = ""
+				m.lastError = err.Error()
+				m.mu.Unlock()
+				log.Printf("ensure family env failed: %v", err)
+				return
+			}
 		}
 
 		w, err := m.spawn(ctx, family)
@@ -303,7 +270,7 @@ func (m *Manager) doLoad(ctx context.Context, name string, family string) {
 			log.Printf("worker spawn failed: %v", err)
 			return
 		}
-		w.setOnEvent(m.handleEvent)
+		w.SetOnEvent(m.handleEvent)
 		m.worker = w
 		m.workerFamily = family
 		m.state = StateLoading
@@ -316,7 +283,7 @@ func (m *Manager) doLoad(ctx context.Context, name string, family string) {
 	w := m.worker
 	m.mu.Unlock()
 
-	reply, err := w.send(ctx, "load_model", map[string]any{"name": name})
+	reply, err := w.Send(ctx, "load_model", map[string]any{"name": name})
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -341,8 +308,9 @@ func (m *Manager) doLoad(ctx context.Context, name string, family string) {
 }
 
 // handleEvent is the worker.onEvent callback. Fires for every unsolicited
-// worker→host message; today that's just phase updates from model loaders.
-// Keep this fast — it runs on the worker's read-loop goroutine.
+// worker→host message; today that's phase updates, audio frames, and
+// download lifecycle events. Keep this fast — it runs on the worker's
+// read-loop goroutine.
 func (m *Manager) handleEvent(msg map[string]any) {
 	event, _ := msg["event"].(string)
 	switch event {
@@ -359,15 +327,13 @@ func (m *Manager) handleEvent(msg map[string]any) {
 		m.mu.Unlock()
 	case "audio_out", "stream_error":
 		// Stream events go to the active session's channel. Routing
-		// lives in stream.go to keep base64 / chunk-shape concerns out
-		// of the lifecycle state machine.
+		// lives in stream.go to keep chunk-shape concerns out of the
+		// lifecycle state machine.
 		m.dispatchStreamEvent(msg)
 	case "download_progress", "download_done", "download_error":
-		// Download lifecycle events update the inflightDownloads map
-		// and (on completion) write the manifest entry. Routing lives
-		// in downloads.go to keep that state machine separate from
-		// the load state machine.
-		m.handleDownloadEvent(event, msg)
+		// Download lifecycle is owned by the downloads.Service; route
+		// through so its inflight map and manifest writes stay current.
+		m.downloads.HandleEvent(event, msg)
 	}
 }
 
@@ -400,7 +366,169 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	m.mu.Unlock()
 
 	if w != nil {
-		_ = w.stop(ctx)
+		_ = w.Stop(ctx)
 	}
 }
 
+// --- downloads.WorkerProvider --------------------------------------------------
+
+// Worker satisfies downloads.WorkerProvider. Returns the current worker
+// and its family or (nil, "") when no worker is up.
+func (m *Manager) Worker() (workers.Handle, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.worker, m.workerFamily
+}
+
+// SpawnWorker satisfies downloads.WorkerProvider. Reuses an existing
+// worker if one is up for the requested family; otherwise spawns one
+// and installs the Manager's event handler. Cross-family requests are
+// rejected so a download can't kick out a load mid-session.
+func (m *Manager) SpawnWorker(ctx context.Context, family string) (workers.Handle, error) {
+	m.mu.Lock()
+	if m.worker != nil {
+		if m.workerFamily != "" && m.workerFamily != family {
+			f := m.workerFamily
+			m.mu.Unlock()
+			return nil, fmt.Errorf("worker is running %q models; unload before spawning %q", f, family)
+		}
+		w := m.worker
+		m.mu.Unlock()
+		return w, nil
+	}
+	m.mu.Unlock()
+
+	// Spawn outside the lock — uv cold start can take seconds.
+	spawned, err := m.spawn(ctx, family)
+	if err != nil {
+		return nil, err
+	}
+	spawned.SetOnEvent(m.handleEvent)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Race: another caller may have spawned in parallel. Keep the
+	// first one; tear ours down asynchronously so this caller doesn't
+	// block on Stop.
+	if m.worker != nil {
+		go func() {
+			stopCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			_ = spawned.Stop(stopCtx)
+		}()
+		return m.worker, nil
+	}
+	m.worker = spawned
+	m.workerFamily = family
+	if m.state == StateIdle {
+		m.state = StateReady
+	}
+	return spawned, nil
+}
+
+// --- download / delete passthroughs --------------------------------------------
+
+// DownloadModel kicks off a download via the downloads service. Thin
+// passthrough kept on Manager so the HTTP handler has one entry point
+// for model lifecycle commands.
+func (m *Manager) DownloadModel(name string) error { return m.downloads.Start(name) }
+
+// CancelDownload aborts the in-flight pull for name.
+func (m *Manager) CancelDownload(name string) error { return m.downloads.Cancel(name) }
+
+// ModelInfos is the catalog merged with inflight progress. Single
+// entry point for the /models route.
+func (m *Manager) ModelInfos() []models.ModelInfo { return m.downloads.ModelInfos() }
+
+// DeleteModel removes an installed model from disk and the manifest.
+// Refuses if the model is currently loaded or downloading. After a
+// successful delete, drops the per-family venv if no sibling install
+// or download depends on it (and the worker isn't busy with it).
+func (m *Manager) DeleteModel(name string) error {
+	m.mu.Lock()
+	if m.state == StateServing && m.model == name {
+		m.mu.Unlock()
+		return errors.New("model is currently loaded; unload first")
+	}
+	m.mu.Unlock()
+	if m.downloads.IsInflight(name) {
+		return errors.New("download in progress for this model")
+	}
+
+	cat := models.EntryByName(name)
+	if err := m.downloads.DeleteFiles(name); err != nil {
+		return err
+	}
+	if cat != nil && cat.Family != "" {
+		m.maybeRemoveFamily(cat.Family)
+	}
+	return nil
+}
+
+// maybeRemoveFamily drops the family's .venv if no installed models or
+// inflight downloads from that family remain and the worker isn't busy
+// loading/serving it. Called from DeleteModel after the manifest entry
+// is gone. Conservative — does nothing on the busy path.
+//
+// REASON: tying venv lifetime to "any model from this family is
+// installed" matches the user's mental model — they downloaded a
+// model and now they're deleting it; the supporting Python env should
+// go too. Otherwise hundreds of MB linger on disk indefinitely with
+// no UI affordance to clean up.
+func (m *Manager) maybeRemoveFamily(family string) {
+	if family == "" {
+		return
+	}
+	if m.familyHasInstalled(family) {
+		return
+	}
+	if m.downloads.FamilyHasInflight(family) {
+		return
+	}
+
+	// REASON: the worker stays spawned after a download (so the next
+	// load/download is fast). With the last model in this family now
+	// gone, that idle worker has nothing left to do — but its python
+	// process is still holding open files in .venv, so we have to
+	// stop it before removing. Refuse only when it's actively busy
+	// (loading/serving), since killing then would interrupt the user.
+	var workerToStop workers.Handle
+	m.mu.Lock()
+	if m.workerFamily == family && m.worker != nil {
+		switch m.state {
+		case StateLoading, StateServing:
+			m.mu.Unlock()
+			return
+		case StateStarting, StateReady, StateIdle:
+			workerToStop = m.worker
+			m.worker = nil
+			m.workerFamily = ""
+			m.state = StateIdle
+		}
+	}
+	m.mu.Unlock()
+
+	if workerToStop != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = workerToStop.Stop(stopCtx)
+		cancel()
+	}
+
+	if m.envSetup != nil {
+		_ = m.envSetup.Remove(family)
+	}
+}
+
+// familyHasInstalled reports whether any manifest entry shares the
+// given family. Cheap: manifest.All copies the map under its lock.
+func (m *Manager) familyHasInstalled(family string) bool {
+	if m.manifest == nil {
+		return false
+	}
+	for _, entry := range m.manifest.All() {
+		if cat := models.EntryByName(entry.Name); cat != nil && cat.Family == family {
+			return true
+		}
+	}
+	return false
+}

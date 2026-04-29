@@ -1,9 +1,9 @@
-// AREA: inference · CATALOG · TEST
+// AREA: models · CACHE · TEST
 // Unit tests for the HF cache probe. Construct a fake hub layout in a
 // tmpdir and verify the probe correctly distinguishes downloaded vs
 // missing repos. The catalog itself is tested implicitly via ModelInfos.
 
-package inference
+package models
 
 import (
 	"os"
@@ -38,7 +38,7 @@ func makeFakeRepo(t *testing.T, repo string, withFile bool) string {
 
 func TestIsRepoCached_PresentSnapshotWithFile(t *testing.T) {
 	root := makeFakeRepo(t, "kyutai/moshiko-mlx-q8", true)
-	if !isRepoCached(root, "kyutai/moshiko-mlx-q8") {
+	if !IsRepoCached(root, "kyutai/moshiko-mlx-q8") {
 		t.Fatal("expected downloaded repo to be detected")
 	}
 }
@@ -47,23 +47,23 @@ func TestIsRepoCached_EmptySnapshotReportsMissing(t *testing.T) {
 	// Empty snapshot dir (no files inside) should not count — HF
 	// occasionally creates the dir before populating it.
 	root := makeFakeRepo(t, "kyutai/moshiko-mlx-q8", false)
-	if isRepoCached(root, "kyutai/moshiko-mlx-q8") {
+	if IsRepoCached(root, "kyutai/moshiko-mlx-q8") {
 		t.Fatal("expected empty snapshot to be reported as not downloaded")
 	}
 }
 
 func TestIsRepoCached_AbsentRepo(t *testing.T) {
 	root := t.TempDir()
-	if isRepoCached(root, "kyutai/moshiko-mlx-q8") {
+	if IsRepoCached(root, "kyutai/moshiko-mlx-q8") {
 		t.Fatal("expected absent repo to be reported as not downloaded")
 	}
 }
 
 func TestIsRepoCached_EmptyArgsAreFalse(t *testing.T) {
-	if isRepoCached("", "kyutai/moshiko-mlx-q8") {
+	if IsRepoCached("", "kyutai/moshiko-mlx-q8") {
 		t.Fatal("empty root should be false")
 	}
-	if isRepoCached(t.TempDir(), "") {
+	if IsRepoCached(t.TempDir(), "") {
 		t.Fatal("empty repo should be false")
 	}
 }
@@ -73,7 +73,7 @@ func TestModelInfos_PopulatesAvailableAndDownloaded(t *testing.T) {
 	// pre-cached so we can assert the dynamic fields land correctly.
 	// Picks the right repo for the current platform via the same
 	// helper the catalog uses.
-	entry := defaultMoshiEntry()
+	entry := DefaultMoshiEntry()
 	root := makeFakeRepo(t, entry.Repo, true)
 	t.Setenv("HUGGINGFACE_HUB_CACHE", root)
 

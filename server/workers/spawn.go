@@ -1,17 +1,18 @@
-// AREA: inference · WORKER · IPC
-// Go-side handle to one Python inference worker. Speaks gRPC bidi
-// (Worker.Session) over a unix-domain socket for the local subprocess
-// flavor. The same workerHandle interface is satisfied by a future
-// remote-TCP variant (see grpc_worker.go); only the dial differs.
+// AREA: workers · SPAWN · LOCAL
+// Local-subprocess flavor of a worker. Launches the per-family Python
+// venv at worker/models/<family>/.venv with `--listen unix:<path>`,
+// dials the resulting gRPC server, and waits for the handshake.
+// Returns a *Grpc that satisfies Handle so callers don't care which
+// transport backs it.
 //
 // Lifecycle:
 //
-//	spawnWorker → handshake → send* → stop
+//	SpawnLocal → handshake → Send* → Stop
 //
-// The caller (Manager) serializes state transitions; this file is concerned
-// only with one live subprocess + its gRPC channel.
+// The caller (inference.Manager) serializes state transitions; this
+// file is concerned only with one live subprocess + its gRPC channel.
 
-package inference
+package workers
 
 import (
 	"context"
@@ -36,19 +37,17 @@ const handshakeTimeout = 20 * time.Second
 // don't burn CPU for the whole 20s budget if something's wrong.
 const socketPollInterval = 25 * time.Millisecond
 
-// spawnWorker launches the worker with the per-family Python venv at
-// worker/models/<family>/.venv (cwd stays at worker/ so `import ipc`,
-// `import models` resolve to the shared scaffold). Mints a unique unix
-// socket path, passes it as `--listen unix:<path>`, dials the gRPC
-// server once the socket appears, and waits for the handshake. Any
-// failure before handshake kills the process and surfaces a descriptive
-// error — callers should not use the returned worker if err != nil.
-func spawnWorker(ctx context.Context, workerDir, family string) (*grpcWorker, error) {
+// SpawnLocal launches a worker subprocess against the per-family Python
+// venv and dials it over a unix socket. workerDir is the resolved
+// worker/ scaffold root; family selects which venv. Any failure before
+// handshake kills the process and surfaces a descriptive error —
+// callers should not use the returned worker if err != nil.
+func SpawnLocal(ctx context.Context, workerDir, family string) (*Grpc, error) {
 	if family == "" {
-		return nil, errors.New("spawnWorker: family is required")
+		return nil, errors.New("SpawnLocal: family is required")
 	}
 	if workerDir == "" {
-		return nil, errors.New("spawnWorker: workerDir is required")
+		return nil, errors.New("SpawnLocal: workerDir is required")
 	}
 
 	// STEP 1: resolve the family venv's python. Direct interpreter path
@@ -88,8 +87,8 @@ func spawnWorker(ctx context.Context, workerDir, family string) (*grpcWorker, er
 	}
 
 	// STEP 4: wait for the socket to appear, then dial + open Session.
-	// Wrap kill so any error path before we have a *grpcWorker can clean
-	// up the subprocess.
+	// Wrap kill so any error path before we have a *Grpc can clean up
+	// the subprocess.
 	killOnFail := func() {
 		if cmd.Process != nil {
 			_ = cmd.Process.Signal(syscall.SIGKILL)

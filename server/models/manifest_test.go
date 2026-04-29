@@ -1,7 +1,7 @@
-// AREA: inference · MANIFEST · TEST
+// AREA: models · MANIFEST · TEST
 // Round-trip and corruption tolerance for the on-disk manifest.
 
-package inference
+package models
 
 import (
 	"encoding/json"
