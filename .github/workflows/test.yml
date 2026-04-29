@@ -72,7 +72,7 @@ jobs:
       # step; no separate setup-python needed. The version pin matches
       # what the worker is tested against.
       - name: Install uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
           cache-dependency-glob: worker/uv.lock
