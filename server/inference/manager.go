@@ -121,6 +121,27 @@ type Manager struct {
 	// cached. Seeded from the handshake snapshot, kept current via
 	// download_done events for the rest of the session. Guarded by mu.
 	downloadedRepos map[string]bool
+
+	// Remote reachability state. The Go HTTP server can come up fine
+	// (port bound, /status answering) while the configured remote
+	// worker is unreachable — typo in the URL, expired SLURM
+	// allocation, dead SSH tunnel. Without surfacing this the UI shows
+	// "Started" with an empty catalog and no clue why. Captured from
+	// every dial attempt (eager probe, LoadModel spawn, redial); a
+	// background loop re-probes while not reachable so the banner
+	// auto-clears once the user fixes the underlying issue.
+	//
+	// All three are guarded by mu. Only meaningful in remote mode;
+	// local mode leaves them at zero values.
+	remoteReachable   bool
+	remoteLastError   string
+	remoteLastChecked time.Time
+
+	// shutdownCtx aborts the periodic remote-health probe loop on
+	// Manager.Shutdown so it doesn't outlive the process. Built
+	// alongside the Manager; cancel runs in Shutdown.
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 // Config is the composition-root contract for building a Manager.
@@ -151,6 +172,28 @@ type Snapshot struct {
 	// Error is the last load failure, if any. Present so the UI can show
 	// the error even if its triggering HTTP request already timed out.
 	Error string `json:"error,omitempty"`
+	// Transport identifies the worker backend: "local" (subprocess) or
+	// "remote" (gRPC over TCP+TLS or SSH-tunneled loopback). Lets the
+	// UI label "Local subprocess" vs "Remote (<url>)" in the
+	// server-details popup without having to peek at env vars.
+	Transport string `json:"transport"`
+	// Remote is populated only when Transport == "remote". Lets the UI
+	// surface a banner when the worker is unreachable instead of
+	// leaving the catalog silently empty.
+	Remote *RemoteStatus `json:"remote,omitempty"`
+}
+
+// RemoteStatus reports the health of the configured remote worker
+// connection. URL is the dial target (token redacted by definition —
+// it's never in here). Reachable flips false when a dial fails and
+// back true when the next handshake (eager probe, LoadModel, periodic
+// re-probe) succeeds; LastError is the most recent dial failure
+// message, cleared on a reachable transition.
+type RemoteStatus struct {
+	URL         string    `json:"url"`
+	Reachable   bool      `json:"reachable"`
+	LastError   string    `json:"lastError,omitempty"`
+	LastChecked time.Time `json:"lastChecked"`
 }
 
 // NewManager builds a Manager in the idle state. Starting the worker is
@@ -188,6 +231,7 @@ func NewManager(cfg Config) *Manager {
 			return workers.SpawnLocal(ctx, cfg.WorkerDir, family)
 		}
 	}
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	m := &Manager{
 		state:           StateIdle,
 		envSetup:        envSetup,
@@ -196,6 +240,8 @@ func NewManager(cfg Config) *Manager {
 		remote:          cfg.Remote,
 		platformReady:   make(chan struct{}),
 		downloadedRepos: map[string]bool{},
+		shutdownCtx:     shutdownCtx,
+		shutdownCancel:  shutdownCancel,
 	}
 	m.downloads = downloads.New(m, envSetup, mf)
 
@@ -212,6 +258,11 @@ func NewManager(cfg Config) *Manager {
 		// the user clicks Load. Runs on a goroutine so NewManager stays
 		// non-blocking.
 		go m.probeRemotePlatform()
+		// Periodic re-probe whenever reachability is false. Lets the
+		// UI banner clear automatically when the user fixes a tunnel /
+		// starts a SLURM job / pastes the right token without having
+		// to restart the app.
+		go m.remoteHealthLoop()
 	}
 	return m
 }
@@ -221,11 +272,14 @@ func NewManager(cfg Config) *Manager {
 // is nil (Service skips Ensure) and manifest is nil unless the test
 // supplies one via setManifest.
 func newManagerWithSpawn(spawn SpawnFn) *Manager {
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	m := &Manager{
 		state:           StateIdle,
 		spawn:           spawn,
 		platformReady:   make(chan struct{}),
 		downloadedRepos: map[string]bool{},
+		shutdownCtx:     shutdownCtx,
+		shutdownCancel:  shutdownCancel,
 	}
 	m.downloads = downloads.New(m, nil, nil)
 	// Tests default to local mode (no remote endpoint set).
@@ -337,6 +391,12 @@ func (m *Manager) doLoad(ctx context.Context, name string, family string) {
 			m.lastError = err.Error()
 			m.mu.Unlock()
 			log.Printf("worker spawn failed: %v", err)
+			// Spawn failure on a remote worker is the same signal as a
+			// failed eager probe — the box isn't reachable. Marking it
+			// here keeps /status fresh between periodic re-probes.
+			if m.remote != nil {
+				m.markRemoteUnreachable(err)
+			}
 			return
 		}
 		w.SetOnEvent(m.handleEvent)
@@ -351,6 +411,9 @@ func (m *Manager) doLoad(ctx context.Context, name string, family string) {
 		m.recordHandshakePlatformLocked(w.Platform())
 		m.markPlatformReady()
 		m.mu.Unlock()
+		if m.remote != nil {
+			m.markRemoteReachable()
+		}
 		go m.watchWorker(w, family)
 	}
 
@@ -431,13 +494,25 @@ func (m *Manager) handleEvent(msg map[string]any) {
 func (m *Manager) Status() Snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Snapshot{
+	snap := Snapshot{
 		State:  m.state,
 		Model:  m.model,
 		Device: m.device,
 		Phase:  m.phase,
 		Error:  m.lastError,
 	}
+	if m.remote != nil {
+		snap.Transport = "remote"
+		snap.Remote = &RemoteStatus{
+			URL:         m.remote.URL,
+			Reachable:   m.remoteReachable,
+			LastError:   m.remoteLastError,
+			LastChecked: m.remoteLastChecked,
+		}
+	} else {
+		snap.Transport = "local"
+	}
+	return snap
 }
 
 // Shutdown terminates the worker subprocess if one is running. Safe to call
@@ -451,8 +526,16 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	m.device = ""
 	m.phase = ""
 	m.state = StateIdle
+	cancel := m.shutdownCancel
 	m.mu.Unlock()
 
+	// SAFETY: cancel the shutdown context BEFORE calling Stop on the
+	// worker — the periodic remote-health probe runs on this context
+	// and holds gRPC connections; if we leave it running across
+	// Shutdown it'll dial against a stopped state machine.
+	if cancel != nil {
+		cancel()
+	}
 	if w != nil {
 		_ = w.Stop(ctx)
 	}
@@ -489,7 +572,13 @@ func (m *Manager) SpawnWorker(ctx context.Context, family string) (workers.Handl
 	// Spawn outside the lock — uv cold start can take seconds.
 	spawned, err := m.spawn(ctx, family)
 	if err != nil {
+		if m.remote != nil {
+			m.markRemoteUnreachable(err)
+		}
 		return nil, err
+	}
+	if m.remote != nil {
+		m.markRemoteReachable()
 	}
 	spawned.SetOnEvent(m.handleEvent)
 
@@ -751,6 +840,7 @@ func (m *Manager) probeRemotePlatform() {
 	w, err := m.spawn(ctx, "")
 	if err != nil {
 		log.Printf("remote platform probe failed: %v (catalog will populate after first load)", err)
+		m.markRemoteUnreachable(err)
 		m.markPlatformReady()
 		return
 	}
@@ -759,6 +849,7 @@ func (m *Manager) probeRemotePlatform() {
 	m.mu.Lock()
 	m.recordHandshakePlatformLocked(plat)
 	m.mu.Unlock()
+	m.markRemoteReachable()
 	m.markPlatformReady()
 
 	// SAFETY: Disconnect, not Stop. The probe's job is "open a session,
@@ -767,5 +858,100 @@ func (m *Manager) probeRemotePlatform() {
 	// would then get a connection-reset because there's no listener
 	// left. Disconnect closes only the gRPC channel; the worker stays
 	// up to serve subsequent dials.
+	_ = w.Disconnect()
+}
+
+// --- Remote reachability ----------------------------------------------------
+//
+// The Go HTTP server's "running" state means the laptop-side process
+// is up; it doesn't mean the remote worker is reachable. These helpers
+// + the periodic loop below let /status carry the remote-side health
+// separately so the UI can show a banner instead of an empty catalog.
+
+// remoteHealthInterval governs how often the periodic loop re-probes
+// while reachability is false. var (not const) so tests can shrink it
+// without slowing the suite. 30s balances "fix-then-see" responsiveness
+// against connection churn while the user fiddles with their tunnel.
+var remoteHealthInterval = 30 * time.Second
+
+// markRemoteReachable records that a recent dial against the remote
+// worker succeeded. Idempotent; the LastChecked timestamp updates on
+// every success so the UI can show "checked 4s ago."
+func (m *Manager) markRemoteReachable() {
+	now := time.Now().UTC()
+	m.mu.Lock()
+	m.remoteReachable = true
+	m.remoteLastError = ""
+	m.remoteLastChecked = now
+	m.mu.Unlock()
+}
+
+// markRemoteUnreachable records the most recent dial failure. Repeated
+// failures with the same error overwrite each other (no error
+// accumulation) so the UI shows the latest, not the first.
+func (m *Manager) markRemoteUnreachable(err error) {
+	now := time.Now().UTC()
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	m.mu.Lock()
+	m.remoteReachable = false
+	m.remoteLastError = msg
+	m.remoteLastChecked = now
+	m.mu.Unlock()
+}
+
+// remoteHealthLoop re-probes the remote worker on a slow interval
+// while reachability is false. Stops re-probing when reachability
+// flips true — subsequent user actions (LoadModel, Download) keep the
+// flag fresh, and a transport drop will mark unreachable again to
+// re-arm the loop.
+//
+// SAFETY: shutdownCtx is the kill switch; Manager.Shutdown cancels it
+// to bring this goroutine down before the test/process exits. Without
+// that, tests would leak a goroutine per Manager construction.
+func (m *Manager) remoteHealthLoop() {
+	t := time.NewTicker(remoteHealthInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-m.shutdownCtx.Done():
+			return
+		case <-t.C:
+			// Skip the probe when reachability is already true — saves
+			// a TLS handshake every interval for no information gain.
+			// Other dial sites refresh the flag on success/failure so
+			// staleness is bounded by user activity in the happy case.
+			m.mu.Lock()
+			reachable := m.remoteReachable
+			m.mu.Unlock()
+			if reachable {
+				continue
+			}
+			m.runHealthProbe()
+		}
+	}
+}
+
+// runHealthProbe is one health-check tick: dial, capture handshake,
+// disconnect. Same shape as probeRemotePlatform but doesn't touch the
+// platformReady gate (already closed by the eager probe). Refreshes
+// the platform snapshot on success so a worker that came back with a
+// new HF cache state (e.g. an out-of-band download) reflects in the
+// catalog without waiting for a LoadModel.
+func (m *Manager) runHealthProbe() {
+	ctx, cancel := context.WithTimeout(m.shutdownCtx, 15*time.Second)
+	defer cancel()
+	w, err := m.spawn(ctx, "")
+	if err != nil {
+		m.markRemoteUnreachable(err)
+		return
+	}
+	plat := w.Platform()
+	m.mu.Lock()
+	m.recordHandshakePlatformLocked(plat)
+	m.mu.Unlock()
+	m.markRemoteReachable()
 	_ = w.Disconnect()
 }

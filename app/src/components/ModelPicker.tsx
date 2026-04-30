@@ -408,6 +408,28 @@ export function ModelPicker() {
   return (
     <div className="fixed bottom-4 left-4 flex w-[22rem] max-w-[90vw] flex-col gap-2 rounded-md border bg-card/80 p-3 text-xs backdrop-blur">
       <div className="font-medium text-foreground">Models</div>
+      {/* REASON: server can be "running" while the configured remote
+          worker is unreachable (typo in URL, expired SLURM allocation,
+          dead tunnel). Without this banner the catalog just sits empty
+          and the user has no clue why. The server's periodic probe
+          re-checks every 30s, so this banner clears automatically
+          once they fix the underlying problem. */}
+      {status.transport === "remote" &&
+        status.remote &&
+        !status.remote.reachable &&
+        serverUp && (
+          <div className="rounded border border-red-400/40 bg-red-500/10 p-2 text-red-500">
+            <div className="font-medium">Remote worker unreachable</div>
+            <div className="mt-0.5 text-[11px] text-red-400">
+              {status.remote.url}
+            </div>
+            {status.remote.lastError && (
+              <div className="mt-0.5 break-words text-[11px] text-red-400">
+                {status.remote.lastError}
+              </div>
+            )}
+          </div>
+        )}
       <div className="flex flex-col gap-1.5">
         {models.length === 0 && serverUp && (
           // REASON: catalog hasn't landed yet — first /models fetch is

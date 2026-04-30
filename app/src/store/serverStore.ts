@@ -46,6 +46,19 @@ export type InferenceSnapshot = {
   device: string;
   phase: string;
   error?: string;
+  // "local" (subprocess) or "remote" (gRPC over TCP+TLS / SSH tunnel).
+  // Lets the popup label the transport without peeking at env vars.
+  transport: "local" | "remote";
+  // Present only when transport == "remote". Drives the unreachable
+  // banner — when reachable=false, lastError carries the dial error.
+  remote?: RemoteStatus;
+};
+
+export type RemoteStatus = {
+  url: string;
+  reachable: boolean;
+  lastError?: string;
+  lastChecked: string; // RFC3339
 };
 
 const EMPTY_SNAPSHOT: InferenceSnapshot = {
@@ -53,6 +66,7 @@ const EMPTY_SNAPSHOT: InferenceSnapshot = {
   model: "",
   device: "",
   phase: "",
+  transport: "local",
 };
 
 // Per-download progress, mirrored from server/inference/catalog.go's

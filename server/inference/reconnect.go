@@ -103,6 +103,15 @@ func (m *Manager) watchWorker(w workers.Handle, family string) {
 	// STEP 3: remote drop — retry with backoff. priorState shapes the
 	// post-reconnect message: a serving session means the user lost
 	// audio context; a ready session means they didn't notice.
+	// REASON: a transport drop means the remote is no longer reachable
+	// for the duration of the redial budget. Mark unreachable now so
+	// /status reflects the disconnect during the backoff window —
+	// without this the UI keeps showing "reachable" for up to 30s
+	// while we silently retry. markRemoteReachable below flips it
+	// back if redial succeeds.
+	if m.remote != nil {
+		m.markRemoteUnreachable(errors.New("transport dropped; reconnecting"))
+	}
 	log.Printf("remote worker disconnected (family=%s); attempting reconnect", family)
 	fresh, err := m.redialWithBackoff(family)
 	if err != nil {
@@ -110,8 +119,14 @@ func (m *Manager) watchWorker(w workers.Handle, family string) {
 		m.state = StateIdle
 		m.lastError = "remote worker disconnected: " + err.Error()
 		m.mu.Unlock()
+		if m.remote != nil {
+			m.markRemoteUnreachable(err)
+		}
 		log.Printf("remote worker reconnect failed: %v", err)
 		return
+	}
+	if m.remote != nil {
+		m.markRemoteReachable()
 	}
 
 	// STEP 4: install the fresh handle, but first re-check that we

@@ -87,15 +87,44 @@ export function ServerControl() {
     ? DEVICE_LABEL[snapshot.device] ?? snapshot.device
     : "—";
 
+  // Transport label: "Local subprocess" vs "Remote (<url>)". Helps when
+  // the user toggles env vars and forgets which mode the server picked
+  // up — without this they'd have to read stderr to figure out.
+  const transportLabel =
+    snapshot.transport === "remote"
+      ? `Remote (${snapshot.remote?.url ?? "—"})`
+      : "Local subprocess";
+
+  // Reachability badge for the popup row. A separate signal from
+  // "Server: Running" because the Go server can be up while the
+  // remote worker is down.
+  const remoteReachable = snapshot.remote?.reachable;
+  const reachLabel =
+    snapshot.transport === "remote"
+      ? remoteReachable
+        ? "Reachable"
+        : "Unreachable"
+      : null;
+
   return (
     <div className="group fixed bottom-4 right-4 flex flex-col items-end gap-2">
       {/* Hover panel — slides up from the control. Only meaningful while
           the server is running, since otherwise there's nothing to show. */}
       <div
-        className="pointer-events-none flex w-56 translate-y-1 flex-col gap-1 rounded-md border bg-card/90 p-3 text-xs opacity-0 shadow-md backdrop-blur transition-all duration-150 group-hover:translate-y-0 group-hover:opacity-100"
+        className="pointer-events-none flex w-64 translate-y-1 flex-col gap-1 rounded-md border bg-card/90 p-3 text-xs opacity-0 shadow-md backdrop-blur transition-all duration-150 group-hover:translate-y-0 group-hover:opacity-100"
       >
         <div className="mb-1 font-medium text-foreground">Server details</div>
         <Row label="Server" value={meta.label} />
+        <Row label="Transport" value={transportLabel} />
+        {reachLabel && (
+          <Row
+            label="Worker"
+            value={reachLabel}
+            valueClass={
+              remoteReachable ? "text-foreground" : "text-red-500"
+            }
+          />
+        )}
         <Row label="Device" value={deviceLabel} />
         <Row label="Model" value={snapshot.model || "—"} />
         <Row label="Inference" value={inferenceLabel(snapshot)} />
@@ -120,11 +149,21 @@ export function ServerControl() {
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({
+  label,
+  value,
+  valueClass,
+}: {
+  label: string;
+  value: string;
+  valueClass?: string;
+}) {
   return (
     <div className="flex items-baseline justify-between gap-2">
       <span className="text-muted-foreground">{label}</span>
-      <span className="truncate text-foreground">{value}</span>
+      <span className={`truncate ${valueClass ?? "text-foreground"}`}>
+        {value}
+      </span>
     </div>
   );
 }
