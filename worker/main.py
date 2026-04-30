@@ -68,6 +68,20 @@ if _mps_high:
     os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.0")
     os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", _mps_high)
 
+# REASON: silence the "FD from fork parent still in poll list" log line
+# grpc-c-core emits when huggingface_hub forks download workers after
+# our gRPC server has initialized. Benign — the child fixes its FDs —
+# but surfaces through the Go stderr forwarder as if it were an error.
+# Must be set before any gRPC import (read once at c-core init).
+os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "1")
+
+# REASON: kill the two HF features that fork their own worker pools.
+# Telemetry is a one-call analytics ping; hf_transfer is the Rust
+# parallel-download path. Single-process downloads are plenty fast for
+# moshi's ~5 GB and remove the fork-after-init trigger entirely.
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+
 import ipc
 
 # REASON: family selection happens here, in the composition root.
