@@ -23,6 +23,8 @@ import (
 	"syscall"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/ARTIFACT-CX/cypress/proto/dist/go/workerpb"
 )
@@ -197,7 +199,18 @@ func (w *Grpc) recvLoop() {
 			// EOF / cancellation are normal stop paths. Anything else
 			// gets logged so an unexpected transport failure isn't
 			// silent.
-			if err != io.EOF && !errors.Is(err, context.Canceled) {
+			//
+			// REASON: gRPC wraps a context-cancel into a status.Error
+			// with code = Canceled rather than passing context.Canceled
+			// up directly, so errors.Is alone misses it. Check both —
+			// the bare error covers stream context cancels we issued,
+			// and the status check covers gRPC's wrapped form. The
+			// eager-probe Disconnect path produces the wrapped form
+			// every startup; without this we'd log a benign "rpc error:
+			// code = Canceled" on every Cypress launch.
+			if err != io.EOF &&
+				!errors.Is(err, context.Canceled) &&
+				status.Code(err) != codes.Canceled {
 				log.Printf("worker: recv: %v", err)
 			}
 			break
