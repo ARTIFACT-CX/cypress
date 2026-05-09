@@ -330,10 +330,11 @@ func TestStream_Close_ClosesOutputsChannel(t *testing.T) {
 	}
 }
 
-func TestStream_StreamErrorEventBecomesTextChunk(t *testing.T) {
+func TestStream_StreamErrorEventBecomesErrorChunk(t *testing.T) {
 	// Worker-side drain failures arrive as stream_error events. Surface
-	// them on the same channel the consumer is already reading so the WS
-	// handler doesn't have to plumb a second error pathway through.
+	// them via StreamOutput.Error so the WS handler can map to a typed
+	// error envelope — voiceSession promotes that to the session's
+	// error state, no transcript pollution.
 	fake := &fakeWorker{}
 	m := servingManager(t, fake)
 	stream, err := m.StartStream(context.Background())
@@ -349,8 +350,11 @@ func TestStream_StreamErrorEventBecomesTextChunk(t *testing.T) {
 
 	select {
 	case got := <-stream.Outputs():
-		if got.Text == "" || !contains(got.Text, "kaboom") {
-			t.Errorf("text = %q, want substring 'kaboom'", got.Text)
+		if got.Error == "" || !contains(got.Error, "kaboom") {
+			t.Errorf("error = %q, want substring 'kaboom'", got.Error)
+		}
+		if got.Text != "" {
+			t.Errorf("text = %q, want empty (error chunks are typed)", got.Text)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no chunk received for stream_error")

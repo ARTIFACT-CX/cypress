@@ -305,18 +305,50 @@ pub async fn kill_remote_workers(profile: &RemoteProfile) -> Result<(), String> 
 }
 
 /// Wait for the worker's gRPC port to actually accept a connection
-/// through the existing tunnel. Bounded by `timeout_secs` because moshi
-/// + torch import on a fresh venv can take 10–20s on a cold node.
+/// AND speak HTTP/2 through the existing tunnel. Bounded by
+/// `timeout_secs` because moshi + torch import on a fresh venv can
+/// take 10–20s on a cold node.
+///
+/// REASON: a plain TCP-connect probe is insufficient. The kernel
+/// accepts the moment grpc.aio.server binds the port, which can be a
+/// beat before the gRPC dispatcher is wired up to send the HTTP/2
+/// SETTINGS frame on accept. If Cypress's eager-probe dial fires in
+/// that gap, it gets RST mid-handshake and the user sees a stale
+/// "connection reset by peer" banner for ~30s until the periodic
+/// re-probe succeeds (closes #48). Tightening the wait to require
+/// real HTTP/2 readiness eliminates the race entirely.
 pub async fn wait_for_worker(local_port: u16, timeout_secs: u64) -> Result<(), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // RFC 7540 §3.5 — the client preface is a fixed byte string the
+    // server must read before talking. We send it just to keep our
+    // handshake idiomatic; the server's SETTINGS frame is what we
+    // actually want to observe.
+    const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
     let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+
     loop {
-        if TcpStream::connect(("127.0.0.1", local_port)).await.is_ok() {
-            // REASON: TCP connect succeeds the moment the gRPC server
-            // binds, which can be a beat before the python dispatcher
-            // is actually wired up. The Go server's eager probe (#36)
-            // tolerates this with a 15s handshake budget; we just need
-            // the listener up before returning.
-            return Ok(());
+        match TcpStream::connect(("127.0.0.1", local_port)).await {
+            Ok(mut stream) => {
+                // Send preface + try to read at least one byte. A live
+                // gRPC server replies with a SETTINGS frame proactively
+                // — bytes back means "fully serving."
+                let probe = async {
+                    stream.write_all(PREFACE).await?;
+                    stream.flush().await?;
+                    let mut buf = [0u8; 1];
+                    stream.read_exact(&mut buf).await?;
+                    Ok::<(), std::io::Error>(())
+                };
+                match timeout(Duration::from_millis(800), probe).await {
+                    Ok(Ok(())) => return Ok(()),
+                    // RST or short read mid-handshake → server isn't
+                    // fully ready yet, fall through to retry.
+                    Ok(Err(_)) | Err(_) => {}
+                }
+            }
+            Err(_) => {
+                // TCP refused entirely — listener isn't even up. Retry.
+            }
         }
         if std::time::Instant::now() > deadline {
             return Err(format!(

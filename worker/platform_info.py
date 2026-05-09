@@ -155,6 +155,83 @@ def downloaded_repos() -> list[str]:
     return out
 
 
+# --- GPU probe ---------------------------------------------------------------
+#
+# Best-effort identification of the accelerator the worker will actually
+# run on. Returns (name, memory_gb). Both empty/0 when no GPU is
+# present or the framework is missing — the host treats that as
+# "device unknown" and falls back to the existing "Device: NVIDIA
+# (CUDA)" generic string.
+#
+# We probe in priority order: CUDA via torch first (the dominant remote
+# case), then MLX/Metal on Apple Silicon, then nothing. We deliberately
+# don't import torch / mlx unconditionally — that's expensive at boot
+# and would defeat the import gating in available_backends.
+
+
+def _has_module(name: str) -> bool:
+    """Wrap importlib.util.find_spec — the same gotcha as
+    available_backends(): find_spec("mlx.core") raises
+    ModuleNotFoundError when the parent package is absent rather than
+    returning None. We always want a bool answer here, not an
+    exception, so a missing framework just probes False."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def gpu_info() -> tuple[str, int]:
+    # CUDA branch: torch may be importable but report no devices when
+    # CUDA isn't available (CPU-only build, container missing nvidia
+    # runtime, etc.). Catch broadly because this is diagnostic info,
+    # not a blocking precondition.
+    if _has_module("torch"):
+        try:
+            import torch  # type: ignore
+
+            if torch.cuda.is_available():
+                idx = 0
+                name = torch.cuda.get_device_name(idx)
+                # total_memory is bytes; round to GiB for the popup.
+                props = torch.cuda.get_device_properties(idx)
+                gb = max(0, int(round(props.total_memory / (1024**3))))
+                return name, gb
+        except Exception:
+            pass
+
+    # MLX branch: Apple Silicon. mlx.core exposes metal device info; we
+    # combine with platform.uname for a clean label since mlx itself
+    # doesn't return a chip name.
+    if _has_module("mlx.core"):
+        try:
+            import mlx.core as mx  # type: ignore
+
+            # SAFETY: mlx's get_active_memory / device APIs vary across
+            # versions. Wrap each step so a missing helper just returns
+            # less detail rather than failing the whole probe.
+            try:
+                info = mx.metal.device_info()
+                # device_info() returns a dict on recent mlx versions;
+                # older versions have different shape. Pull what we can.
+                arch = info.get("architecture") if isinstance(info, dict) else None
+                mem_bytes = info.get("memory_size") if isinstance(info, dict) else None
+            except Exception:
+                arch, mem_bytes = None, None
+
+            chip = platform.processor() or arch or "Apple Silicon"
+            gb = (
+                max(0, int(round(mem_bytes / (1024**3))))
+                if isinstance(mem_bytes, (int, float))
+                else 0
+            )
+            return chip, gb
+        except Exception:
+            pass
+
+    return "", 0
+
+
 # --- Snapshot builder --------------------------------------------------------
 
 
@@ -162,9 +239,12 @@ def gather(family: str) -> dict:
     """Collect every field the gRPC Handshake carries. Returned as a
     plain dict so the IPC layer can splat it into the protobuf without
     importing this module's types."""
+    name, gb = gpu_info()
     return {
         "os": os_name(),
         "arch": arch_name(),
         "available_backends": available_backends(family),
         "downloaded_repos": downloaded_repos(),
+        "gpu_name": name,
+        "gpu_memory_gb": gb,
     }

@@ -194,7 +194,22 @@ class MoshiStream:
         cancelled. Per frame: encode PCM → step LM → decode emitted
         tokens → emit chunks. CPU/GPU work goes through to_thread so
         the asyncio loop stays responsive (shutdown commands, the
-        consumer draining outputs, etc.)."""
+        consumer draining outputs, etc.).
+
+        REASON: any exception raised inside _step (CUDA error, mimi
+        shape mismatch, the torch.compile/Python 3.14 case from #41)
+        used to die silently — asyncio logs it but the host's session
+        kept running with state=serving and 0% GPU util, an
+        impossible state to debug from the laptop. We now bridge those
+        failures into the same stream_error path used by the dispatcher
+        in commands.py so the host can promote them to an error
+        envelope and the UI shows a banner.
+        """
+        # Lazy import to keep this module's import cost flat — stream
+        # creation is hot enough that pulling in ipc.commands at module
+        # load would slow first-session start.
+        from ipc.commands import emit_event
+
         try:
             while True:
                 frame = await self._input_queue.get()
@@ -209,6 +224,20 @@ class MoshiStream:
             # exits cleanly, and we don't want CancelledError to escape
             # past the task boundary.
             pass
+        except Exception as e:
+            # SAFETY: emit_event is best-effort; if the host has gone
+            # away too there's nothing useful we can do. The traceback
+            # still goes to stderr (and on remote workers, the worker
+            # log panel) so the engineer-flavored detail is preserved.
+            import traceback
+
+            traceback.print_exc()
+            try:
+                emit_event(
+                    {"event": "stream_error", "error": f"{type(e).__name__}: {e}"}
+                )
+            except Exception:
+                pass
         finally:
             # Always send EOF so a consumer parked on __anext__ exits
             # rather than hanging forever.

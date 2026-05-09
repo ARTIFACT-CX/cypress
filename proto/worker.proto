@@ -107,6 +107,12 @@ message Handshake {
   string arch = 4;                          // "amd64" | "arm64"
   repeated string available_backends = 5;   // ["torch"] | ["mlx", "torch"]
   repeated string downloaded_repos = 6;     // HF repo IDs already cached
+  // Hardware identity. Empty when the worker can't tell (no torch,
+  // no mlx, headless probe). Surfaced in the server-details popup so
+  // operators can sanity-check that RunPod / SLURM gave them the box
+  // they actually requested.
+  string gpu_name = 7;                      // "NVIDIA H100 80GB HBM3" | "Apple M2 Pro" | ""
+  uint32 gpu_memory_gb = 8;                 // total VRAM (CUDA) or unified memory (MLX); 0 if unknown
 }
 
 message Reply {

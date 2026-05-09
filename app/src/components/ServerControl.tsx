@@ -89,9 +89,19 @@ export function ServerControl() {
   const disabled =
     busy || status.state === "starting" || status.state === "stopping";
 
-  const deviceLabel = snapshot.device
+  // REASON: prefer the worker-reported hardware identity ("NVIDIA H100
+  // 80GB · CUDA") over the generic device label ("NVIDIA (CUDA)") when
+  // it lands. Falls back when the worker hasn't reported (older
+  // worker, CPU-only host) so the row never sits empty.
+  const baseDeviceLabel = snapshot.device
     ? DEVICE_LABEL[snapshot.device] ?? snapshot.device
     : "—";
+  const hw = snapshot.hardware;
+  const deviceLabel = hw?.gpuName
+    ? hw.gpuMemoryGb
+      ? `${hw.gpuName} ${hw.gpuMemoryGb}GB · ${baseDeviceLabel}`
+      : `${hw.gpuName} · ${baseDeviceLabel}`
+    : baseDeviceLabel;
 
   // Transport label: "Local subprocess" vs "Remote (<url>)". Helps when
   // the user toggles env vars and forgets which mode the server picked

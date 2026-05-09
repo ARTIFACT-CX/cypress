@@ -60,4 +60,9 @@ type StreamOutput struct {
 	// Text is the inner-monologue token if the model emitted one this
 	// step; empty on the (majority of) frames that have only audio.
 	Text string
+	// Error carries a worker-side stream_error (e.g. CUDA crash, mimi
+	// shape mismatch). Non-empty signals "generation can't continue"
+	// — the WS handler maps this to a {type:"error",...} envelope so
+	// the UI shows a banner instead of treating it as transcript text.
+	Error string
 }

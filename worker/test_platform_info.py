@@ -73,5 +73,9 @@ def test_gather_returns_all_fields():
     assert "arch" in info
     assert "available_backends" in info
     assert "downloaded_repos" in info
+    assert "gpu_name" in info
+    assert "gpu_memory_gb" in info
     assert isinstance(info["available_backends"], list)
     assert isinstance(info["downloaded_repos"], list)
+    assert isinstance(info["gpu_name"], str)
+    assert isinstance(info["gpu_memory_gb"], int)

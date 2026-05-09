@@ -54,10 +54,15 @@ type Handle interface {
 // Apple-Silicon laptop dialing a Linux GPU worker would tell it to
 // download MLX weights it can't load. OS / Arch follow Go's runtime
 // naming ("linux"/"darwin", "amd64"/"arm64") so the host can compare
-// strings without a translation table.
+// strings without a translation table. GPUName / GPUMemoryGB are
+// diagnostic — surfaced in the server-details popup so operators can
+// confirm RunPod / SLURM gave them the box they actually requested.
+// Both empty when the worker can't tell.
 type Platform struct {
 	OS                string
 	Arch              string
 	AvailableBackends []string
 	DownloadedRepos   []string
+	GPUName           string
+	GPUMemoryGB       uint32
 }

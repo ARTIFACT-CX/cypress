@@ -31,10 +31,14 @@ const streamOutputBuffer = 32
 // StreamOutput is one model-step output in audio's wire shape. PCM is
 // int16 LE mono at the session's sample rate (24kHz for Moshi). Text is
 // non-empty only on frames where the LM emitted a real inner-monologue
-// token; most frames have it empty.
+// token; most frames have it empty. Error is set only on a stream_error
+// event from the worker — its presence flips the consumer onto the
+// error-envelope WS path so the UI can show a banner instead of just
+// pretending the bad output is normal transcript text.
 type StreamOutput struct {
-	PCM  []byte
-	Text string
+	PCM   []byte
+	Text  string
+	Error string
 }
 
 // Stream is a live duplex session. Construct via Manager.StartStream;
@@ -245,10 +249,11 @@ func (m *Manager) dispatchStreamEvent(msg map[string]any) {
 		text, _ := msg["text"].(string)
 		s.receive(StreamOutput{PCM: pcm, Text: text})
 	case "stream_error":
-		// Surfaced as a text-only chunk so the consumer sees something
-		// in the same channel it's already reading. The WS handler can
-		// decide to translate this into a JSON error frame for the UI.
+		// Surface as a typed error chunk. The WS handler maps it to a
+		// {type:"error", message:...} envelope which voiceSession.ts
+		// already promotes to the session's error state — no
+		// transcript pollution, banner pops automatically.
 		errStr, _ := msg["error"].(string)
-		s.receive(StreamOutput{Text: "[stream_error] " + errStr})
+		s.receive(StreamOutput{Error: errStr})
 	}
 }

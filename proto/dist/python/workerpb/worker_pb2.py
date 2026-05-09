@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cworker.proto\x12\x11\x63ypress.worker.v1\"\xc5\x04\n\tClientMsg\x12\n\n\x02id\x18\x01 \x01(\x04\x12.\n\x06status\x18\n \x01(\x0b\x32\x1c.cypress.worker.v1.StatusReqH\x00\x12\x35\n\nload_model\x18\x0b \x01(\x0b\x32\x1f.cypress.worker.v1.LoadModelReqH\x00\x12.\n\x06unload\x18\x0c \x01(\x0b\x32\x1c.cypress.worker.v1.UnloadReqH\x00\x12\x32\n\x08shutdown\x18\r \x01(\x0b\x32\x1e.cypress.worker.v1.ShutdownReqH\x00\x12/\n\x07run_wav\x18\x0e \x01(\x0b\x32\x1c.cypress.worker.v1.RunWavReqH\x00\x12\x39\n\x0cstart_stream\x18\x14 \x01(\x0b\x32!.cypress.worker.v1.StartStreamReqH\x00\x12\x31\n\x08\x61udio_in\x18\x15 \x01(\x0b\x32\x1d.cypress.worker.v1.AudioInReqH\x00\x12\x37\n\x0bstop_stream\x18\x16 \x01(\x0b\x32 .cypress.worker.v1.StopStreamReqH\x00\x12=\n\x0e\x64ownload_model\x18\x1e \x01(\x0b\x32#.cypress.worker.v1.DownloadModelReqH\x00\x12?\n\x0f\x63\x61ncel_download\x18\x1f \x01(\x0b\x32$.cypress.worker.v1.CancelDownloadReqH\x00\x42\t\n\x07payload\"\x0b\n\tStatusReq\"\x0b\n\tUnloadReq\"\r\n\x0bShutdownReq\"\x10\n\x0eStartStreamReq\"\x0f\n\rStopStreamReq\"\x13\n\x11\x43\x61ncelDownloadReq\"\x1c\n\x0cLoadModelReq\x12\x0c\n\x04name\x18\x01 \x01(\t\"*\n\tRunWavReq\x12\r\n\x05input\x18\x01 \x01(\t\x12\x0e\n\x06output\x18\x02 \x01(\t\"\x19\n\nAudioInReq\x12\x0b\n\x03pcm\x18\x01 \x01(\x0c\"a\n\x10\x44ownloadModelReq\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0c\n\x04repo\x18\x02 \x01(\t\x12\r\n\x05\x66iles\x18\x03 \x03(\t\x12\x15\n\x08revision\x18\x04 \x01(\tH\x00\x88\x01\x01\x42\x0b\n\t_revision\"\x9f\x01\n\tServerMsg\x12\x31\n\thandshake\x18\x01 \x01(\x0b\x32\x1c.cypress.worker.v1.HandshakeH\x00\x12)\n\x05reply\x18\x02 \x01(\x0b\x32\x18.cypress.worker.v1.ReplyH\x00\x12)\n\x05\x65vent\x18\x03 \x01(\x0b\x32\x18.cypress.worker.v1.EventH\x00\x42\t\n\x07payload\"\x88\x01\n\tHandshake\x12\r\n\x05ready\x18\x01 \x01(\x08\x12\x12\n\x05\x66\x61tal\x18\x02 \x01(\tH\x00\x88\x01\x01\x12\n\n\x02os\x18\x03 \x01(\t\x12\x0c\n\x04\x61rch\x18\x04 \x01(\t\x12\x1a\n\x12\x61vailable_backends\x18\x05 \x03(\t\x12\x18\n\x10\x64ownloaded_repos\x18\x06 \x03(\tB\x08\n\x06_fatal\"\xf9\x02\n\x05Reply\x12\n\n\x02id\x18\x01 \x01(\x04\x12(\n\x02ok\x18\x02 \x01(\x0b\x32\x1a.cypress.worker.v1.OkEmptyH\x00\x12-\n\x06status\x18\n \x01(\x0b\x32\x1b.cypress.worker.v1.StatusOkH\x00\x12\x34\n\nload_model\x18\x0b \x01(\x0b\x32\x1e.cypress.worker.v1.LoadModelOkH\x00\x12\x38\n\x0cstart_stream\x18\x0c \x01(\x0b\x32 .cypress.worker.v1.StartStreamOkH\x00\x12@\n\x10\x64ownload_started\x18\r \x01(\x0b\x32$.cypress.worker.v1.DownloadStartedOkH\x00\x12>\n\x0f\x63\x61ncel_download\x18\x0e \x01(\x0b\x32#.cypress.worker.v1.CancelDownloadOkH\x00\x12\x0f\n\x05\x65rror\x18\x63 \x01(\tH\x00\x42\x08\n\x06result\"\t\n\x07OkEmpty\"H\n\x08StatusOk\x12\x12\n\x05model\x18\x01 \x01(\tH\x00\x88\x01\x01\x12\x13\n\x06\x64\x65vice\x18\x02 \x01(\tH\x01\x88\x01\x01\x42\x08\n\x06_modelB\t\n\x07_device\"<\n\x0bLoadModelOk\x12\r\n\x05model\x18\x01 \x01(\t\x12\x13\n\x06\x64\x65vice\x18\x02 \x01(\tH\x00\x88\x01\x01\x42\t\n\x07_device\"$\n\rStartStreamOk\x12\x13\n\x0bsample_rate\x18\x01 \x01(\r\"$\n\x11\x44ownloadStartedOk\x12\x0f\n\x07started\x18\x01 \x01(\x08\"\"\n\x10\x43\x61ncelDownloadOk\x12\x0e\n\x06\x61\x63tive\x18\x01 \x01(\x08\"\xea\x02\n\x05\x45vent\x12\x34\n\x0bmodel_phase\x18\x01 \x01(\x0b\x32\x1d.cypress.worker.v1.ModelPhaseH\x00\x12\x30\n\taudio_out\x18\x02 \x01(\x0b\x32\x1b.cypress.worker.v1.AudioOutH\x00\x12\x36\n\x0cstream_error\x18\x03 \x01(\x0b\x32\x1e.cypress.worker.v1.StreamErrorH\x00\x12@\n\x11\x64ownload_progress\x18\x04 \x01(\x0b\x32#.cypress.worker.v1.DownloadProgressH\x00\x12\x38\n\rdownload_done\x18\x05 \x01(\x0b\x32\x1f.cypress.worker.v1.DownloadDoneH\x00\x12:\n\x0e\x64ownload_error\x18\x06 \x01(\x0b\x32 .cypress.worker.v1.DownloadErrorH\x00\x42\t\n\x07payload\";\n\nModelPhase\x12\r\n\x05phase\x18\x01 \x01(\t\x12\x13\n\x06\x64\x65vice\x18\x02 \x01(\tH\x00\x88\x01\x01\x42\t\n\x07_device\"%\n\x08\x41udioOut\x12\x0b\n\x03pcm\x18\x01 \x01(\x0c\x12\x0c\n\x04text\x18\x02 \x01(\t\"\x1c\n\x0bStreamError\x12\r\n\x05\x65rror\x18\x01 \x01(\t\"\x88\x01\n\x10\x44ownloadProgress\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05phase\x18\x02 \x01(\t\x12\x12\n\ndownloaded\x18\x03 \x01(\x04\x12\r\n\x05total\x18\x04 \x01(\x04\x12\x0c\n\x04\x66ile\x18\x05 \x01(\t\x12\x12\n\nfile_index\x18\x06 \x01(\r\x12\x12\n\nfile_count\x18\x07 \x01(\r\"r\n\x0c\x44ownloadDone\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0c\n\x04repo\x18\x02 \x01(\t\x12\x15\n\x08revision\x18\x03 \x01(\tH\x00\x88\x01\x01\x12\r\n\x05\x66iles\x18\x04 \x03(\t\x12\x13\n\x0btotal_bytes\x18\x05 \x01(\x04\x42\x0b\n\t_revision\",\n\rDownloadError\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05\x65rror\x18\x02 \x01(\t2S\n\x06Worker\x12I\n\x07Session\x12\x1c.cypress.worker.v1.ClientMsg\x1a\x1c.cypress.worker.v1.ServerMsg(\x01\x30\x01\x42\x37Z5github.com/ARTIFACT-CX/cypress/proto/dist/go/workerpbb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cworker.proto\x12\x11\x63ypress.worker.v1\"\xc5\x04\n\tClientMsg\x12\n\n\x02id\x18\x01 \x01(\x04\x12.\n\x06status\x18\n \x01(\x0b\x32\x1c.cypress.worker.v1.StatusReqH\x00\x12\x35\n\nload_model\x18\x0b \x01(\x0b\x32\x1f.cypress.worker.v1.LoadModelReqH\x00\x12.\n\x06unload\x18\x0c \x01(\x0b\x32\x1c.cypress.worker.v1.UnloadReqH\x00\x12\x32\n\x08shutdown\x18\r \x01(\x0b\x32\x1e.cypress.worker.v1.ShutdownReqH\x00\x12/\n\x07run_wav\x18\x0e \x01(\x0b\x32\x1c.cypress.worker.v1.RunWavReqH\x00\x12\x39\n\x0cstart_stream\x18\x14 \x01(\x0b\x32!.cypress.worker.v1.StartStreamReqH\x00\x12\x31\n\x08\x61udio_in\x18\x15 \x01(\x0b\x32\x1d.cypress.worker.v1.AudioInReqH\x00\x12\x37\n\x0bstop_stream\x18\x16 \x01(\x0b\x32 .cypress.worker.v1.StopStreamReqH\x00\x12=\n\x0e\x64ownload_model\x18\x1e \x01(\x0b\x32#.cypress.worker.v1.DownloadModelReqH\x00\x12?\n\x0f\x63\x61ncel_download\x18\x1f \x01(\x0b\x32$.cypress.worker.v1.CancelDownloadReqH\x00\x42\t\n\x07payload\"\x0b\n\tStatusReq\"\x0b\n\tUnloadReq\"\r\n\x0bShutdownReq\"\x10\n\x0eStartStreamReq\"\x0f\n\rStopStreamReq\"\x13\n\x11\x43\x61ncelDownloadReq\"\x1c\n\x0cLoadModelReq\x12\x0c\n\x04name\x18\x01 \x01(\t\"*\n\tRunWavReq\x12\r\n\x05input\x18\x01 \x01(\t\x12\x0e\n\x06output\x18\x02 \x01(\t\"\x19\n\nAudioInReq\x12\x0b\n\x03pcm\x18\x01 \x01(\x0c\"a\n\x10\x44ownloadModelReq\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0c\n\x04repo\x18\x02 \x01(\t\x12\r\n\x05\x66iles\x18\x03 \x03(\t\x12\x15\n\x08revision\x18\x04 \x01(\tH\x00\x88\x01\x01\x42\x0b\n\t_revision\"\x9f\x01\n\tServerMsg\x12\x31\n\thandshake\x18\x01 \x01(\x0b\x32\x1c.cypress.worker.v1.HandshakeH\x00\x12)\n\x05reply\x18\x02 \x01(\x0b\x32\x18.cypress.worker.v1.ReplyH\x00\x12)\n\x05\x65vent\x18\x03 \x01(\x0b\x32\x18.cypress.worker.v1.EventH\x00\x42\t\n\x07payload\"\xb1\x01\n\tHandshake\x12\r\n\x05ready\x18\x01 \x01(\x08\x12\x12\n\x05\x66\x61tal\x18\x02 \x01(\tH\x00\x88\x01\x01\x12\n\n\x02os\x18\x03 \x01(\t\x12\x0c\n\x04\x61rch\x18\x04 \x01(\t\x12\x1a\n\x12\x61vailable_backends\x18\x05 \x03(\t\x12\x18\n\x10\x64ownloaded_repos\x18\x06 \x03(\t\x12\x10\n\x08gpu_name\x18\x07 \x01(\t\x12\x15\n\rgpu_memory_gb\x18\x08 \x01(\rB\x08\n\x06_fatal\"\xf9\x02\n\x05Reply\x12\n\n\x02id\x18\x01 \x01(\x04\x12(\n\x02ok\x18\x02 \x01(\x0b\x32\x1a.cypress.worker.v1.OkEmptyH\x00\x12-\n\x06status\x18\n \x01(\x0b\x32\x1b.cypress.worker.v1.StatusOkH\x00\x12\x34\n\nload_model\x18\x0b \x01(\x0b\x32\x1e.cypress.worker.v1.LoadModelOkH\x00\x12\x38\n\x0cstart_stream\x18\x0c \x01(\x0b\x32 .cypress.worker.v1.StartStreamOkH\x00\x12@\n\x10\x64ownload_started\x18\r \x01(\x0b\x32$.cypress.worker.v1.DownloadStartedOkH\x00\x12>\n\x0f\x63\x61ncel_download\x18\x0e \x01(\x0b\x32#.cypress.worker.v1.CancelDownloadOkH\x00\x12\x0f\n\x05\x65rror\x18\x63 \x01(\tH\x00\x42\x08\n\x06result\"\t\n\x07OkEmpty\"H\n\x08StatusOk\x12\x12\n\x05model\x18\x01 \x01(\tH\x00\x88\x01\x01\x12\x13\n\x06\x64\x65vice\x18\x02 \x01(\tH\x01\x88\x01\x01\x42\x08\n\x06_modelB\t\n\x07_device\"<\n\x0bLoadModelOk\x12\r\n\x05model\x18\x01 \x01(\t\x12\x13\n\x06\x64\x65vice\x18\x02 \x01(\tH\x00\x88\x01\x01\x42\t\n\x07_device\"$\n\rStartStreamOk\x12\x13\n\x0bsample_rate\x18\x01 \x01(\r\"$\n\x11\x44ownloadStartedOk\x12\x0f\n\x07started\x18\x01 \x01(\x08\"\"\n\x10\x43\x61ncelDownloadOk\x12\x0e\n\x06\x61\x63tive\x18\x01 \x01(\x08\"\xea\x02\n\x05\x45vent\x12\x34\n\x0bmodel_phase\x18\x01 \x01(\x0b\x32\x1d.cypress.worker.v1.ModelPhaseH\x00\x12\x30\n\taudio_out\x18\x02 \x01(\x0b\x32\x1b.cypress.worker.v1.AudioOutH\x00\x12\x36\n\x0cstream_error\x18\x03 \x01(\x0b\x32\x1e.cypress.worker.v1.StreamErrorH\x00\x12@\n\x11\x64ownload_progress\x18\x04 \x01(\x0b\x32#.cypress.worker.v1.DownloadProgressH\x00\x12\x38\n\rdownload_done\x18\x05 \x01(\x0b\x32\x1f.cypress.worker.v1.DownloadDoneH\x00\x12:\n\x0e\x64ownload_error\x18\x06 \x01(\x0b\x32 .cypress.worker.v1.DownloadErrorH\x00\x42\t\n\x07payload\";\n\nModelPhase\x12\r\n\x05phase\x18\x01 \x01(\t\x12\x13\n\x06\x64\x65vice\x18\x02 \x01(\tH\x00\x88\x01\x01\x42\t\n\x07_device\"%\n\x08\x41udioOut\x12\x0b\n\x03pcm\x18\x01 \x01(\x0c\x12\x0c\n\x04text\x18\x02 \x01(\t\"\x1c\n\x0bStreamError\x12\r\n\x05\x65rror\x18\x01 \x01(\t\"\x88\x01\n\x10\x44ownloadProgress\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05phase\x18\x02 \x01(\t\x12\x12\n\ndownloaded\x18\x03 \x01(\x04\x12\r\n\x05total\x18\x04 \x01(\x04\x12\x0c\n\x04\x66ile\x18\x05 \x01(\t\x12\x12\n\nfile_index\x18\x06 \x01(\r\x12\x12\n\nfile_count\x18\x07 \x01(\r\"r\n\x0c\x44ownloadDone\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0c\n\x04repo\x18\x02 \x01(\t\x12\x15\n\x08revision\x18\x03 \x01(\tH\x00\x88\x01\x01\x12\r\n\x05\x66iles\x18\x04 \x03(\t\x12\x13\n\x0btotal_bytes\x18\x05 \x01(\x04\x42\x0b\n\t_revision\",\n\rDownloadError\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05\x65rror\x18\x02 \x01(\t2S\n\x06Worker\x12I\n\x07Session\x12\x1c.cypress.worker.v1.ClientMsg\x1a\x1c.cypress.worker.v1.ServerMsg(\x01\x30\x01\x42\x37Z5github.com/ARTIFACT-CX/cypress/proto/dist/go/workerpbb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -57,35 +57,35 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_SERVERMSG']._serialized_start=917
   _globals['_SERVERMSG']._serialized_end=1076
   _globals['_HANDSHAKE']._serialized_start=1079
-  _globals['_HANDSHAKE']._serialized_end=1215
-  _globals['_REPLY']._serialized_start=1218
-  _globals['_REPLY']._serialized_end=1595
-  _globals['_OKEMPTY']._serialized_start=1597
-  _globals['_OKEMPTY']._serialized_end=1606
-  _globals['_STATUSOK']._serialized_start=1608
-  _globals['_STATUSOK']._serialized_end=1680
-  _globals['_LOADMODELOK']._serialized_start=1682
-  _globals['_LOADMODELOK']._serialized_end=1742
-  _globals['_STARTSTREAMOK']._serialized_start=1744
-  _globals['_STARTSTREAMOK']._serialized_end=1780
-  _globals['_DOWNLOADSTARTEDOK']._serialized_start=1782
-  _globals['_DOWNLOADSTARTEDOK']._serialized_end=1818
-  _globals['_CANCELDOWNLOADOK']._serialized_start=1820
-  _globals['_CANCELDOWNLOADOK']._serialized_end=1854
-  _globals['_EVENT']._serialized_start=1857
-  _globals['_EVENT']._serialized_end=2219
-  _globals['_MODELPHASE']._serialized_start=2221
-  _globals['_MODELPHASE']._serialized_end=2280
-  _globals['_AUDIOOUT']._serialized_start=2282
-  _globals['_AUDIOOUT']._serialized_end=2319
-  _globals['_STREAMERROR']._serialized_start=2321
-  _globals['_STREAMERROR']._serialized_end=2349
-  _globals['_DOWNLOADPROGRESS']._serialized_start=2352
-  _globals['_DOWNLOADPROGRESS']._serialized_end=2488
-  _globals['_DOWNLOADDONE']._serialized_start=2490
-  _globals['_DOWNLOADDONE']._serialized_end=2604
-  _globals['_DOWNLOADERROR']._serialized_start=2606
-  _globals['_DOWNLOADERROR']._serialized_end=2650
-  _globals['_WORKER']._serialized_start=2652
-  _globals['_WORKER']._serialized_end=2735
+  _globals['_HANDSHAKE']._serialized_end=1256
+  _globals['_REPLY']._serialized_start=1259
+  _globals['_REPLY']._serialized_end=1636
+  _globals['_OKEMPTY']._serialized_start=1638
+  _globals['_OKEMPTY']._serialized_end=1647
+  _globals['_STATUSOK']._serialized_start=1649
+  _globals['_STATUSOK']._serialized_end=1721
+  _globals['_LOADMODELOK']._serialized_start=1723
+  _globals['_LOADMODELOK']._serialized_end=1783
+  _globals['_STARTSTREAMOK']._serialized_start=1785
+  _globals['_STARTSTREAMOK']._serialized_end=1821
+  _globals['_DOWNLOADSTARTEDOK']._serialized_start=1823
+  _globals['_DOWNLOADSTARTEDOK']._serialized_end=1859
+  _globals['_CANCELDOWNLOADOK']._serialized_start=1861
+  _globals['_CANCELDOWNLOADOK']._serialized_end=1895
+  _globals['_EVENT']._serialized_start=1898
+  _globals['_EVENT']._serialized_end=2260
+  _globals['_MODELPHASE']._serialized_start=2262
+  _globals['_MODELPHASE']._serialized_end=2321
+  _globals['_AUDIOOUT']._serialized_start=2323
+  _globals['_AUDIOOUT']._serialized_end=2360
+  _globals['_STREAMERROR']._serialized_start=2362
+  _globals['_STREAMERROR']._serialized_end=2390
+  _globals['_DOWNLOADPROGRESS']._serialized_start=2393
+  _globals['_DOWNLOADPROGRESS']._serialized_end=2529
+  _globals['_DOWNLOADDONE']._serialized_start=2531
+  _globals['_DOWNLOADDONE']._serialized_end=2645
+  _globals['_DOWNLOADERROR']._serialized_start=2647
+  _globals['_DOWNLOADERROR']._serialized_end=2691
+  _globals['_WORKER']._serialized_start=2693
+  _globals['_WORKER']._serialized_end=2776
 # @@protoc_insertion_point(module_scope)

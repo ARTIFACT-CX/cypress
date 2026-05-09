@@ -170,6 +170,17 @@ func pumpWrite(ctx context.Context, t Transport, session StreamSession) error {
 					log.Printf("audio: send text failed: %v", err)
 				}
 			}
+			if chunk.Error != "" {
+				// REASON: a worker-side stream_error means generation
+				// can't continue. Forward as a {type:"error",...}
+				// envelope; voiceSession.ts already promotes that to
+				// the session's error state, which the existing
+				// caption renders. Returning here ends the pump cleanly
+				// — the worker has stopped emitting, so there's no
+				// further audio to drain.
+				_ = t.SendError(ctx, chunk.Error)
+				return nil
+			}
 		}
 	}
 }

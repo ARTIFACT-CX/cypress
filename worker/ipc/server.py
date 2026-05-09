@@ -249,6 +249,8 @@ class WorkerServicer(pb_grpc.WorkerServicer):
                 arch=self._platform_info.get("arch", ""),
                 available_backends=self._platform_info.get("available_backends", []),
                 downloaded_repos=self._platform_info.get("downloaded_repos", []),
+                gpu_name=self._platform_info.get("gpu_name", ""),
+                gpu_memory_gb=self._platform_info.get("gpu_memory_gb", 0),
             )
         )
 

@@ -70,7 +70,11 @@ func (a *inferenceStreamAdapter) Outputs() <-chan audio.StreamOutput {
 		go func() {
 			defer close(a.out)
 			for chunk := range a.s.Outputs() {
-				a.out <- audio.StreamOutput{PCM: chunk.PCM, Text: chunk.Text}
+				a.out <- audio.StreamOutput{
+					PCM:   chunk.PCM,
+					Text:  chunk.Text,
+					Error: chunk.Error,
+				}
 			}
 		}()
 	})

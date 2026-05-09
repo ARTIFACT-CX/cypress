@@ -159,6 +159,8 @@ func dialGRPC(ctx context.Context, target string, opts []grpc.DialOption, cmd *e
 			Arch:              hs.GetArch(),
 			AvailableBackends: append([]string(nil), hs.GetAvailableBackends()...),
 			DownloadedRepos:   append([]string(nil), hs.GetDownloadedRepos()...),
+			GPUName:           hs.GetGpuName(),
+			GPUMemoryGB:       hs.GetGpuMemoryGb(),
 		},
 	}
 

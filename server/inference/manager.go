@@ -181,6 +181,20 @@ type Snapshot struct {
 	// surface a banner when the worker is unreachable instead of
 	// leaving the catalog silently empty.
 	Remote *RemoteStatus `json:"remote,omitempty"`
+	// Hardware is the worker's reported GPU/accelerator identity from
+	// the latest handshake. Empty fields mean "the worker didn't
+	// report" (older worker, generic Linux box without CUDA, MLX
+	// version that doesn't expose memory). UI surfaces it in the
+	// device row of the server-details popup.
+	Hardware *HardwareInfo `json:"hardware,omitempty"`
+}
+
+// HardwareInfo carries the diagnostic GPU/accelerator fields from the
+// worker's Handshake. Surfaces in /status so the UI can show e.g.
+// "Device: NVIDIA H100 80GB · CUDA" instead of just "CUDA."
+type HardwareInfo struct {
+	GPUName     string `json:"gpuName,omitempty"`
+	GPUMemoryGB uint32 `json:"gpuMemoryGb,omitempty"`
 }
 
 // RemoteStatus reports the health of the configured remote worker
@@ -511,6 +525,16 @@ func (m *Manager) Status() Snapshot {
 		}
 	} else {
 		snap.Transport = "local"
+	}
+	// Surface hardware info only when the worker actually reported
+	// something. Empty GPUName means "no GPU detected on the worker"
+	// — the UI then falls back to its existing generic device label
+	// instead of showing an empty row.
+	if m.workerPlatform.GPUName != "" {
+		snap.Hardware = &HardwareInfo{
+			GPUName:     m.workerPlatform.GPUName,
+			GPUMemoryGB: m.workerPlatform.GPUMemoryGB,
+		}
 	}
 	return snap
 }

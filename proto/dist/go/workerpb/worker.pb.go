@@ -797,8 +797,14 @@ type Handshake struct {
 	Arch              string                 `protobuf:"bytes,4,opt,name=arch,proto3" json:"arch,omitempty"`                                                    // "amd64" | "arm64"
 	AvailableBackends []string               `protobuf:"bytes,5,rep,name=available_backends,json=availableBackends,proto3" json:"available_backends,omitempty"` // ["torch"] | ["mlx", "torch"]
 	DownloadedRepos   []string               `protobuf:"bytes,6,rep,name=downloaded_repos,json=downloadedRepos,proto3" json:"downloaded_repos,omitempty"`       // HF repo IDs already cached
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Hardware identity. Empty when the worker can't tell (no torch,
+	// no mlx, headless probe). Surfaced in the server-details popup so
+	// operators can sanity-check that RunPod / SLURM gave them the box
+	// they actually requested.
+	GpuName       string `protobuf:"bytes,7,opt,name=gpu_name,json=gpuName,proto3" json:"gpu_name,omitempty"`                // "NVIDIA H100 80GB HBM3" | "Apple M2 Pro" | ""
+	GpuMemoryGb   uint32 `protobuf:"varint,8,opt,name=gpu_memory_gb,json=gpuMemoryGb,proto3" json:"gpu_memory_gb,omitempty"` // total VRAM (CUDA) or unified memory (MLX); 0 if unknown
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Handshake) Reset() {
@@ -871,6 +877,20 @@ func (x *Handshake) GetDownloadedRepos() []string {
 		return x.DownloadedRepos
 	}
 	return nil
+}
+
+func (x *Handshake) GetGpuName() string {
+	if x != nil {
+		return x.GpuName
+	}
+	return ""
+}
+
+func (x *Handshake) GetGpuMemoryGb() uint32 {
+	if x != nil {
+		return x.GpuMemoryGb
+	}
+	return 0
 }
 
 type Reply struct {
@@ -1874,14 +1894,16 @@ const file_worker_proto_rawDesc = "" +
 	"\thandshake\x18\x01 \x01(\v2\x1c.cypress.worker.v1.HandshakeH\x00R\thandshake\x120\n" +
 	"\x05reply\x18\x02 \x01(\v2\x18.cypress.worker.v1.ReplyH\x00R\x05reply\x120\n" +
 	"\x05event\x18\x03 \x01(\v2\x18.cypress.worker.v1.EventH\x00R\x05eventB\t\n" +
-	"\apayload\"\xc4\x01\n" +
+	"\apayload\"\x83\x02\n" +
 	"\tHandshake\x12\x14\n" +
 	"\x05ready\x18\x01 \x01(\bR\x05ready\x12\x19\n" +
 	"\x05fatal\x18\x02 \x01(\tH\x00R\x05fatal\x88\x01\x01\x12\x0e\n" +
 	"\x02os\x18\x03 \x01(\tR\x02os\x12\x12\n" +
 	"\x04arch\x18\x04 \x01(\tR\x04arch\x12-\n" +
 	"\x12available_backends\x18\x05 \x03(\tR\x11availableBackends\x12)\n" +
-	"\x10downloaded_repos\x18\x06 \x03(\tR\x0fdownloadedReposB\b\n" +
+	"\x10downloaded_repos\x18\x06 \x03(\tR\x0fdownloadedRepos\x12\x19\n" +
+	"\bgpu_name\x18\a \x01(\tR\agpuName\x12\"\n" +
+	"\rgpu_memory_gb\x18\b \x01(\rR\vgpuMemoryGbB\b\n" +
 	"\x06_fatal\"\xc9\x03\n" +
 	"\x05Reply\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x04R\x02id\x12,\n" +

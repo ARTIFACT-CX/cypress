@@ -52,6 +52,9 @@ export type InferenceSnapshot = {
   // Present only when transport == "remote". Drives the unreachable
   // banner — when reachable=false, lastError carries the dial error.
   remote?: RemoteStatus;
+  // Worker-reported GPU/accelerator identity from the gRPC handshake.
+  // Empty when the worker can't tell (no torch/mlx, headless probe).
+  hardware?: HardwareInfo;
 };
 
 export type RemoteStatus = {
@@ -59,6 +62,11 @@ export type RemoteStatus = {
   reachable: boolean;
   lastError?: string;
   lastChecked: string; // RFC3339
+};
+
+export type HardwareInfo = {
+  gpuName?: string;
+  gpuMemoryGb?: number;
 };
 
 const EMPTY_SNAPSHOT: InferenceSnapshot = {

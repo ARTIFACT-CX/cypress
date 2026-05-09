@@ -99,20 +99,24 @@ class ServerMsg(_message.Message):
     def __init__(self, handshake: _Optional[_Union[Handshake, _Mapping]] = ..., reply: _Optional[_Union[Reply, _Mapping]] = ..., event: _Optional[_Union[Event, _Mapping]] = ...) -> None: ...
 
 class Handshake(_message.Message):
-    __slots__ = ("ready", "fatal", "os", "arch", "available_backends", "downloaded_repos")
+    __slots__ = ("ready", "fatal", "os", "arch", "available_backends", "downloaded_repos", "gpu_name", "gpu_memory_gb")
     READY_FIELD_NUMBER: _ClassVar[int]
     FATAL_FIELD_NUMBER: _ClassVar[int]
     OS_FIELD_NUMBER: _ClassVar[int]
     ARCH_FIELD_NUMBER: _ClassVar[int]
     AVAILABLE_BACKENDS_FIELD_NUMBER: _ClassVar[int]
     DOWNLOADED_REPOS_FIELD_NUMBER: _ClassVar[int]
+    GPU_NAME_FIELD_NUMBER: _ClassVar[int]
+    GPU_MEMORY_GB_FIELD_NUMBER: _ClassVar[int]
     ready: bool
     fatal: str
     os: str
     arch: str
     available_backends: _containers.RepeatedScalarFieldContainer[str]
     downloaded_repos: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, ready: bool = ..., fatal: _Optional[str] = ..., os: _Optional[str] = ..., arch: _Optional[str] = ..., available_backends: _Optional[_Iterable[str]] = ..., downloaded_repos: _Optional[_Iterable[str]] = ...) -> None: ...
+    gpu_name: str
+    gpu_memory_gb: int
+    def __init__(self, ready: bool = ..., fatal: _Optional[str] = ..., os: _Optional[str] = ..., arch: _Optional[str] = ..., available_backends: _Optional[_Iterable[str]] = ..., downloaded_repos: _Optional[_Iterable[str]] = ..., gpu_name: _Optional[str] = ..., gpu_memory_gb: _Optional[int] = ...) -> None: ...
 
 class Reply(_message.Message):
     __slots__ = ("id", "ok", "status", "load_model", "start_stream", "download_started", "cancel_download", "error")
