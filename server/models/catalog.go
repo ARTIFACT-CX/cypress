@@ -54,8 +54,8 @@ func HostPlatform() (os, arch string) {
 // the platform check; if the worker logic ever grows more complex
 // we'll need an IPC query instead.
 // SETUP: shared file names. mimi + tokenizer files are identical across
-// all moshiko-* repos (mlx-q4 / mlx-q8 / mlx-bf16 / pytorch-bf16); only
-// the LM weights filename varies by quantization. Kept as constants so
+// every moshi checkpoint (moshika / moshiko, mlx / pytorch, every
+// quant) — only the LM weights filename varies. Kept as constants so
 // any future repo addition reuses these without re-encoding the
 // filename strings.
 const (
@@ -68,15 +68,16 @@ const (
 // DefaultMoshiEntry returns the Moshi entry for the given target
 // platform. Apple Silicon → MLX-q8 (only place where the bf16-MPS path
 // is too slow to be usable in practice); everything else → torch-bf16.
-// The model itself is the same 3.5B Moshi regardless of variant.
+// Moshi is 7B parameters; the moshika voice (female) is the default —
+// CYPRESS_MOSHI_REPO can swap to moshiko-* for the male voice.
 func DefaultMoshiEntry(os, arch string) Entry {
 	if os == "darwin" && arch == "arm64" {
 		return Entry{
 			Name:         "moshi",
 			Label:        "Moshi",
-			Hint:         "3.5B · duplex · lighter",
+			Hint:         "7B · duplex",
 			Backend:      "mlx",
-			Repo:         "kyutai/moshiko-mlx-q8",
+			Repo:         "kyutai/moshika-mlx-q8",
 			Files:        []string{moshiMlxQ8LMFile, moshiMimiFile, moshiTokenizerFile},
 			SizeGB:       "~4 GB",
 			Requirements: "~6 GB unified memory · Apple Silicon",
@@ -87,9 +88,9 @@ func DefaultMoshiEntry(os, arch string) Entry {
 	return Entry{
 		Name:         "moshi",
 		Label:        "Moshi",
-		Hint:         "3.5B · duplex · lighter",
+		Hint:         "7B · duplex · female voice",
 		Backend:      "torch",
-		Repo:         "kyutai/moshiko-pytorch-bf16",
+		Repo:         "kyutai/moshika-pytorch-bf16",
 		Files:        []string{moshiTorchLMFile, moshiMimiFile, moshiTokenizerFile},
 		SizeGB:       "~14 GB",
 		Requirements: "~14 GB VRAM · CUDA preferred",

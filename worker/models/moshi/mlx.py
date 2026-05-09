@@ -19,10 +19,11 @@ the torch backend as `"moshi"` elsewhere. Explicit `"moshi-mlx"` /
 the same machine. v0.2 will surface this in a settings UI (#21).
 
 SWAP: checkpoint repo via CYPRESS_MOSHI_REPO. Default is
-`kyutai/moshiko-mlx-q8` — int8 quantized, ~4GB, the speed/quality knee
-on most Apple Silicon. Other valid repos: `kyutai/moshiko-mlx-bf16`
-(full quality, ~14GB, slower) and `kyutai/moshiko-mlx-q4` (smaller and
-faster, more quality cost).
+`kyutai/moshika-mlx-q8` — female voice, int8 quantized, ~4GB, the
+speed/quality knee on most Apple Silicon. Other valid repos:
+`kyutai/moshika-mlx-bf16` (full quality, ~14GB, slower),
+`kyutai/moshika-mlx-q4` (smaller and faster, more quality cost), or
+the moshiko-* equivalents for the male voice.
 """
 
 import asyncio
@@ -33,7 +34,7 @@ from ..base import Model, register
 from .mlx_stream import MoshiMlxStream, _StreamComponents
 
 
-DEFAULT_REPO = "kyutai/moshiko-mlx-q8"
+DEFAULT_REPO = "kyutai/moshika-mlx-q8"
 
 # REASON: max_steps allocates the LM's KV cache up front. Streaming
 # sessions don't have a known length; ~10K steps = ~13 minutes of

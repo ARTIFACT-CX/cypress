@@ -15,8 +15,8 @@ func TestDefaultMoshiEntry_AppleSilicon_PicksMLX(t *testing.T) {
 	if e.Backend != "mlx" {
 		t.Errorf("backend = %q, want %q", e.Backend, "mlx")
 	}
-	if e.Repo != "kyutai/moshiko-mlx-q8" {
-		t.Errorf("repo = %q, want kyutai/moshiko-mlx-q8", e.Repo)
+	if e.Repo != "kyutai/moshika-mlx-q8" {
+		t.Errorf("repo = %q, want kyutai/moshika-mlx-q8", e.Repo)
 	}
 }
 
@@ -28,8 +28,8 @@ func TestDefaultMoshiEntry_LinuxAmd64_PicksTorch(t *testing.T) {
 	if e.Backend != "torch" {
 		t.Errorf("backend = %q, want %q", e.Backend, "torch")
 	}
-	if e.Repo != "kyutai/moshiko-pytorch-bf16" {
-		t.Errorf("repo = %q, want kyutai/moshiko-pytorch-bf16", e.Repo)
+	if e.Repo != "kyutai/moshika-pytorch-bf16" {
+		t.Errorf("repo = %q, want kyutai/moshika-pytorch-bf16", e.Repo)
 	}
 }
 
@@ -89,7 +89,7 @@ func TestModelInfos_DownloadedSetWins_OverLocalProbe(t *testing.T) {
 	// successful remote pull. This is the second half of the bug.
 	t.Setenv("HUGGINGFACE_HUB_CACHE", t.TempDir()) // empty cache locally
 	downloaded := map[string]bool{
-		"kyutai/moshiko-pytorch-bf16": true,
+		"kyutai/moshika-pytorch-bf16": true,
 	}
 	infos := ModelInfos("linux", "amd64", downloaded, nil)
 	var moshi *ModelInfo

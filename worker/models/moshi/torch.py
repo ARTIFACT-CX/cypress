@@ -28,10 +28,11 @@ from ..base import Model, register
 from .torch_stream import MoshiStream, _StreamComponents
 
 
-# SETUP: which HF repo we pull from. Defaults to the bf16 moshiko variant
-# (male voice, ~14GB). CYPRESS_MOSHI_REPO lets the user point at an
-# alternative — e.g. a q8 variant for tighter memory, or a local mirror.
-DEFAULT_REPO = "kyutai/moshiko-pytorch-bf16"
+# SETUP: which HF repo we pull from. Defaults to the bf16 moshika variant
+# (female voice, ~14GB). CYPRESS_MOSHI_REPO lets the user point at an
+# alternative — moshiko-pytorch-bf16 for the male voice, a q8 variant
+# for tighter memory, or a local mirror.
+DEFAULT_REPO = "kyutai/moshika-pytorch-bf16"
 
 
 def _detect_device() -> str:
