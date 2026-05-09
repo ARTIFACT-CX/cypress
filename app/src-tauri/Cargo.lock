@@ -476,11 +476,13 @@ name = "cypress"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

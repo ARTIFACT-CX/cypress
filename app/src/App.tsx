@@ -2,6 +2,7 @@ import logo from "./assets/logo.png";
 import { ModelPicker } from "./components/ModelPicker";
 import { ServerControl } from "./components/ServerControl";
 import { VoiceButton } from "./components/VoiceButton";
+import { WorkerLogPanel } from "./components/WorkerLogPanel";
 import { useChromaticAberration } from "./hooks/useChromaticAberration";
 import { useVoiceStore } from "./store/voiceStore";
 
@@ -37,6 +38,12 @@ function App() {
       </main>
       <ModelPicker />
       <ServerControl />
+      {/* Worker log panel sits left-of-center bottom so it doesn't
+          overlap the server control or the bottom-center voice
+          button. Only mounts when there's something to show. */}
+      <div className="pointer-events-none fixed bottom-4 left-4">
+        <WorkerLogPanel />
+      </div>
       <VoiceButton />
     </>
   );

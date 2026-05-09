@@ -20,6 +20,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 
+use crate::remote::{self, RemoteState};
+
 // SETUP: port must match server/main.go's `listenAddr`. If you change it
 // there, change it here. Kept as a plain const (rather than config) because
 // it's a hard-coded local dev address — no reason to surface it.
@@ -103,8 +105,18 @@ async fn set_status(app: &AppHandle, inner: &Mutex<Inner>, status: ServerStatus)
 /// running, returns immediately. Otherwise spawns `go run .` in the server
 /// directory, waits until the health port is reachable, and emits status
 /// transitions along the way.
+///
+/// When a remote profile is active, this also brings up the SSH tunnel
+/// before spawning the Go child and threads the resulting URL+token in
+/// as env vars so the Go server dials the remote worker. Disconnecting
+/// happens implicitly via stop_server, which tears down both children
+/// in the right order.
 #[tauri::command]
-pub async fn start_server(app: AppHandle, state: State<'_, ServerState>) -> Result<(), String> {
+pub async fn start_server(
+    app: AppHandle,
+    state: State<'_, ServerState>,
+    remote_state: State<'_, RemoteState>,
+) -> Result<(), String> {
     // STEP 1: fast-path check. Grab the lock only long enough to inspect and
     // flip to Starting — we don't want to hold it across the spawn.
     {
@@ -127,6 +139,33 @@ pub async fn start_server(app: AppHandle, state: State<'_, ServerState>) -> Resu
     free_port_blocking(SERVER_PORT);
     sleep(Duration::from_millis(200)).await;
 
+    // STEP 1b: bring up the SSH tunnel if a remote profile is active.
+    // We do this BEFORE spawning Go so the tunnel's local port is ready
+    // by the time the Go server's eager probe (#36) tries to dial it —
+    // otherwise the probe fires before the tunnel binds and Cypress
+    // shows the Unreachable banner for ~30s while the periodic health
+    // loop catches up.
+    let remote_env = match remote::active_profile(&app).await {
+        Ok(Some(profile)) => {
+            match remote::connect(&app, &profile, &remote_state).await {
+                Ok((port, token)) => Some((format!("tcp://localhost:{port}"), token)),
+                Err(e) => {
+                    let msg = format!("remote tunnel: {e}");
+                    set_status(&app, &state.inner, ServerStatus::Error { message: msg.clone() })
+                        .await;
+                    return Err(msg);
+                }
+            }
+        }
+        Ok(None) => None,
+        Err(e) => {
+            let msg = format!("remote profile lookup: {e}");
+            set_status(&app, &state.inner, ServerStatus::Error { message: msg.clone() })
+                .await;
+            return Err(msg);
+        }
+    };
+
     // STEP 2: spawn `go run .` with stdout/stderr piped so we can log it.
     // We create a new process group (on unix) so that when we later kill the
     // process, the go toolchain's child binary gets cleaned up too — without
@@ -138,6 +177,15 @@ pub async fn start_server(app: AppHandle, state: State<'_, ServerState>) -> Resu
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+
+    // SETUP: thread remote env vars onto the Go child if the user picked
+    // a remote profile. Go's composition root reads these and switches
+    // its spawn closure from local subprocess to gRPC dial — see
+    // server/inference/manager.go's NewManager.
+    if let Some((url, token)) = &remote_env {
+        cmd.env("CYPRESS_REMOTE_URL", url);
+        cmd.env("CYPRESS_REMOTE_TOKEN", token);
+    }
 
     #[cfg(unix)]
     {
@@ -155,11 +203,32 @@ pub async fn start_server(app: AppHandle, state: State<'_, ServerState>) -> Resu
 
     let mut child = cmd.spawn().map_err(|e| {
         let msg = format!("failed to spawn go server: {e}");
-        // STEP 2a: if spawn fails, roll status back to Error so UI unsticks.
+        // STEP 2a: if spawn fails, roll status back to Error so UI unsticks
+        // and tear down the remote tunnel if we brought one up — same
+        // reason as the timeout path, an orphan ssh child would block
+        // the next attempt.
         let inner = state.inner.clone();
         let app2 = app.clone();
+        let remote_shared = remote_state.shared();
         let emsg = msg.clone();
         tauri::async_runtime::spawn(async move {
+            // Inline the kill-children logic rather than calling
+            // remote::disconnect — we hold the cloned Arc directly here,
+            // which is safe across the await without a State<'_, ...>
+            // borrow.
+            {
+                let mut g = remote_shared.lock().await;
+                if let Some(mut w) = g.worker.take() {
+                    let _ = w.start_kill();
+                    let _ = w.wait().await;
+                }
+                if let Some(mut t) = g.tunnel.take() {
+                    let _ = t.start_kill();
+                    let _ = t.wait().await;
+                }
+                g.token = None;
+                g.local_port = None;
+            }
             set_status(&app2, &inner, ServerStatus::Error { message: emsg }).await;
         });
         msg
@@ -260,6 +329,13 @@ pub async fn start_server(app: AppHandle, state: State<'_, ServerState>) -> Resu
             if let Some(mut c) = child_opt {
                 let _ = c.wait().await;
             }
+            drop(guard);
+            // SAFETY: tear down the remote tunnel too if we brought one
+            // up — leaving the SSH child alive after a Go-server start
+            // failure would orphan a -L port and block the next attempt
+            // with EADDRINUSE on 7843.
+            remote::disconnect(&app, &remote_state).await;
+            let mut guard = state.inner.lock().await;
             guard.status = ServerStatus::Error {
                 message: "server did not become reachable before timeout".into(),
             };
@@ -279,8 +355,17 @@ pub async fn start_server(app: AppHandle, state: State<'_, ServerState>) -> Resu
 /// briefly for clean exit, then SIGKILLs the group if the graceful path
 /// didn't finish in time. Always signals via pgid so we kill `go run` *and*
 /// its compiled-binary grandchild as one unit.
+///
+/// Also tears down any remote SSH children (tunnel + Phase 2 worker)
+/// after the Go server stops. Order matters: Go first so its dial
+/// attempts don't keep firing during the SSH teardown, then SSH so the
+/// tunnel + worker actually go away.
 #[tauri::command]
-pub async fn stop_server(app: AppHandle, state: State<'_, ServerState>) -> Result<(), String> {
+pub async fn stop_server(
+    app: AppHandle,
+    state: State<'_, ServerState>,
+    remote_state: State<'_, RemoteState>,
+) -> Result<(), String> {
     // STEP 1: transition to Stopping and snapshot pgid + any still-owned
     // child handle. We take pgid too so a concurrent window-close handler
     // doesn't try to signal a group we're already reaping.
@@ -331,9 +416,17 @@ pub async fn stop_server(app: AppHandle, state: State<'_, ServerState>) -> Resul
         }
     }
 
-    let mut guard = state.inner.lock().await;
-    guard.status = ServerStatus::Idle;
+    {
+        let mut guard = state.inner.lock().await;
+        guard.status = ServerStatus::Idle;
+    }
     let _ = app.emit(STATUS_EVENT, ServerStatus::Idle);
+
+    // SAFETY: tear down the SSH children AFTER the Go server is gone.
+    // If we did this in reverse order, the Go server's auto-reconnect
+    // logic would fire on the disappearing tunnel and emit a misleading
+    // "remote worker reconnect failed" before its own shutdown reaped it.
+    remote::disconnect(&app, &remote_state).await;
     Ok(())
 }
 

@@ -11,6 +11,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useRemoteStore } from "./remoteStore";
 import {
   SERVER_URL,
   useServerStore,
@@ -18,6 +19,7 @@ import {
   type ModelInfo,
   type ServerStatus,
 } from "./serverStore";
+import { useWorkerLogStore } from "./workerLogStore";
 
 // Polling cadences. Fast while a model is loading or a load is
 // pending so the user sees live phase updates; slower while idle.
@@ -110,6 +112,11 @@ export function initServerStore() {
   if (started) return;
   started = true;
 
+  // STEP 0: load remote profiles from disk so the picker has data to
+  // render on first paint. Independent of server status — the user can
+  // edit profiles before starting the server.
+  void useRemoteStore.getState().refresh();
+
   // STEP 1: hydrate initial server lifecycle once. The Rust side has
   // a current value even before our event listener is attached.
   invoke<ServerStatus>("server_status")
@@ -150,6 +157,24 @@ export function initServerStore() {
         void fetchModels();
       }
       lastInferenceState = next;
+    }
+  });
+
+  // STEP 5: pipe remote-worker stderr lines into the log ringbuffer.
+  // Mirrors WORKER_LOG_EVENT in src-tauri/src/remote/ssh.rs. We also
+  // clear the buffer when the server transitions out of running so
+  // the tail always reflects the current connection.
+  void listen<string>("remote-worker-log", (e) => {
+    useWorkerLogStore.getState().push(e.payload);
+  });
+  let lastServerState: ServerStatus["state"] = "idle";
+  useServerStore.subscribe((s) => {
+    const next = s.status.state;
+    if (next !== lastServerState) {
+      if (next === "idle" || next === "error") {
+        useWorkerLogStore.getState().clear();
+      }
+      lastServerState = next;
     }
   });
 

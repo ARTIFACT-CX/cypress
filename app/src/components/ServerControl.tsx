@@ -8,11 +8,14 @@
 // subsystem's snapshot (device, loaded model, phase).
 
 import { useCallback, useState } from "react";
+import { Settings } from "lucide-react";
 import {
   type InferenceSnapshot,
   type ServerStatus,
   useServerStore,
 } from "../store/serverStore";
+import { cn } from "../lib/utils";
+import { RemotesPanel } from "./RemotesPanel";
 
 // Human-readable device labels. Unknown devices fall through to the
 // raw string so a new backend shows up in the UI without a frontend
@@ -60,6 +63,9 @@ export function ServerControl() {
   // Local-only: tracks the in-flight invoke so we can show "Stopping…"
   // visuals before the Rust side has emitted its status transition.
   const [busy, setBusy] = useState(false);
+  // Remotes panel toggle. Default closed so the bottom-right control
+  // stays compact for users who never touch remotes.
+  const [showRemotes, setShowRemotes] = useState(false);
 
   const onClick = useCallback(async () => {
     setBusy(true);
@@ -131,11 +137,33 @@ export function ServerControl() {
         {snapshot.phase && <Row label="Phase" value={snapshot.phase} />}
       </div>
 
+      {/* Remotes panel — collapsed by default so the bottom-right
+          control stays compact. Picking a profile here doesn't connect
+          on its own; the existing Start Server button is what brings up
+          the SSH tunnel + Go child as one unit. */}
+      {showRemotes && (
+        <div className="w-80">
+          <RemotesPanel />
+        </div>
+      )}
+
       <div className="flex items-center gap-3 rounded-md border bg-card/80 px-3 py-2 text-xs backdrop-blur">
         <div className="flex items-center gap-2">
           <span className={`h-2 w-2 rounded-full ${meta.dotClass}`} />
           <span className="text-foreground">{meta.label}</span>
         </div>
+        <button
+          type="button"
+          onClick={() => setShowRemotes((v) => !v)}
+          aria-label={showRemotes ? "Hide remotes panel" : "Show remotes panel"}
+          aria-pressed={showRemotes}
+          className={cn(
+            "rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground",
+            showRemotes && "bg-accent text-foreground",
+          )}
+        >
+          <Settings className="h-3.5 w-3.5" />
+        </button>
         <button
           type="button"
           onClick={onClick}
